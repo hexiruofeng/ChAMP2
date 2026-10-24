@@ -170,5 +170,6 @@ Rscript tools/smoke_test.R
 Rscript tests/testthat.R
 ```
 
-本项目在 R 4.6.1 / Bioconductor 3.23 上通过 `R CMD check`（0 error / 0 warning /
-0 note）与 79 项单元测试，在 R 4.3.3 上通过源码解析与全部内置算法自检。
+本项目在 **R 4.6.1 / Bioconductor 3.23** 上通过 `R CMD check`（0 error / 0 warning /
+0 note）与 90 项单元测试；在 **R 4.3.3 / Bioconductor 3.18** 上完成安装并通过全部
+90 项单元测试；R 4.2.3 由 CI 矩阵覆盖。

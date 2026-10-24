@@ -59,10 +59,10 @@ myGSEA  <- champ.GSEA(beta = myNorm, DMP = myDMP[[1]], DMR = myDMR, arraytype = 
 | 4.5.x       | 3.21 / 3.22  | supported  |
 | 4.6.0–4.6.2 | 3.23 / 3.24  | supported  |
 
-Release 2.32.0 was validated on R 4.6.1 / Bioconductor 3.23 with
-`R CMD check` (0 errors, 0 warnings) and 79 `testthat` assertions; the same
-tree was additionally parsed and smoke-tested on R 4.3.3, and the GitHub
-Actions matrix builds and checks R 4.2.3, 4.3.3, 4.4.3, 4.5.3 and 4.6.1.
+Release 2.32.0 was validated end to end on **R 4.6.1 / Bioconductor 3.23**
+(`R CMD check`: 0 errors, 0 warnings, 0 notes; 90 `testthat` assertions) and on
+**R 4.3.3 / Bioconductor 3.18** (install + 90 `testthat` assertions). The
+GitHub Actions matrix builds and checks R 4.2.3, 4.3.3, 4.4.3, 4.5.3 and 4.6.1.
 
 The code avoids every construct whose behaviour changed in that window: no
 `class(x) == "..."`, no `if (vector | vector)`, no `T`/`F`, no implicit
