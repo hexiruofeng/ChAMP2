@@ -1,100 +1,90 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("myLoad","probe. features.epic","probe.features"))
+# =============================================================================
+#  CpG.GUI -- interactive annotation summary for a set of CpGs
+#
+#  Shows the chromosome, CpG-island, feature and probe-type composition of the
+#  supplied CpG list, plus the annotation table itself.
+# =============================================================================
 
-CpG.GUI <- function(CpG=rownames(myLoad$beta),
-                    arraytype="450K")
-{
-  if(arraytype %in% c("EPIC", "EPICv2")) {
-    data("probe.features.epicv2")
-  } else if(arraytype == "EPICv1") {
-    data("probe.features.epicv1")
-  } else if(arraytype == "450K") { 
-    data("probe.features")
-  } else (
-    stop("arraytype must be `EPICv2`, `EPICv1`, `450K`")
-  )
-  
-  cgi.info <- table(probe.features[CpG,"cgi"])
-  chromsome.info <- table(probe.features[CpG,"CHR"])
-  feature.info <- table(probe.features[CpG,"feature"])
-  type.info <- table(probe.features[CpG,"Type"])
-  
-  app <- shinyApp(
-    ui = fluidPage(
-      tags$head(tags$style("#cgi{height:40vh !important;}")),
-      tags$head(tags$style("#chromsome{height:40vh !important;}")),
-      tags$head(tags$style("#type{height:40vh !important;}")),
-      tags$head(tags$style("#feature{height:40vh !important;}")),
-      theme = shinytheme("readable"),
-      titlePanel("CpG Overview"),
-      tabsetPanel(
-        tabPanel("CpG",
-                 fluidRow(
-                   #column(width = 3,
-                   #       br(),
-                   #       sidebarPanel(  width=12,
-                   #                      numericInput('n', 'Number of obs', 100)
-                   #                   )
-                   #      ),
-                   column(width = 12,
-                          fluidRow(
-                            column(width = 6,
-                                   plotlyOutput("chromsome"),
-                                   plotlyOutput("feature")
-                            ),
-                            column(width = 6,
-                                   plotlyOutput("cgi"),
-                                   plotlyOutput("type")
-                            )
-                          )
-                   )#column 
-                 )#fluidRow 
-        )#tabPanel
-      )#tabsetPanel
-    ),#ui
-    server = function(input, output){
-      output$cgi <- renderPlotly({
-        x <- list(
-          title = ""
-        )
-        p <- plot_ly(x = names(cgi.info),
-                     y = cgi.info,
-                     name = "SF Zoo",
-                     color = "orange",
-                     type = "bar") %>%
-          layout(xaxis = x)
-      })
-      output$chromsome <- renderPlotly({
-        x <- list(
-          title = ""
-        )
-        p <- plot_ly(x = paste("chr",names(chromsome.info),sep=""),
-                     y = chromsome.info,
-                     name = "SF Zoo",
-                     type = "bar") %>%
-          layout(xaxis = x)
-      })
-      output$feature <- renderPlotly({
-        x <- list(
-          title = ""
-        )
-        p <- plot_ly(x = names(feature.info),
-                     y = feature.info,
-                     name = "SF Zoo",
-                     type = "bar") %>%
-          layout(xaxis = x)
-      })
-      output$type <- renderPlotly({
-        x <- list(
-          title = ""
-        )
-        p <- plot_ly(x = names(type.info),
-                     y = type.info,
-                     name = "SF Zoo",
-                     color = "orange",
-                     type = "bar") %>%
-          layout(xaxis = x)
-      })
+utils::globalVariables(c("Class", "Number", "Proportion"))
+
+#' Explore the annotation of a CpG list
+#'
+#' @param CpG character vector of CpG identifiers. NULL uses every probe of the
+#'   array.
+#' @param arraytype "450K", "EPICv1" or "EPICv2".
+#' @param verbose print progress messages.
+#' @param runApp launch the application; FALSE returns the shiny.appobj.
+#'
+#' @return invisibly, the shiny.appobj returned by \code{shiny::runApp}.
+#' @export
+CpG.GUI <- function(CpG = NULL, arraytype = "450K", verbose = TRUE, runApp = TRUE) {
+    talk <- function(...) if (isTRUE(verbose)) .champ_msg(...)
+    talk("[=============================]")
+    talk("[<<<<<< CpG.GUI START >>>>>>>]")
+    .champ_gui_need(dt = TRUE)
+    at <- .champ_arraytype(arraytype)
+    pf <- .champ_probe_features(at)
+    if (is.null(CpG)) {
+        CpG <- rownames(pf)
+        talk("  No CpG list supplied; using all ", length(CpG), " probes.")
     }
-  )
-  runApp(app)
+    CpG <- unique(as.character(CpG))
+    CpG <- CpG[!is.na(CpG)]
+    hit <- intersect(CpG, rownames(pf))
+    if (!length(hit)) .champ_stop("None of the CpGs are present in the ", at, " annotation.")
+    if (length(hit) < length(CpG)) {
+        talk("  ", length(CpG) - length(hit), " CpG(s) are not on the array and are ignored.")
+    }
+    ann <- pf[hit, , drop = FALSE]
+    talk("  Summarising ", nrow(ann), " CpGs.")
+
+    counts <- function(values) {
+        values <- as.character(values)
+        values[is.na(values) | !nzchar(values)] <- "NA"
+        tab <- sort(table(values), decreasing = TRUE)
+        data.frame(Class = names(tab), Number = as.integer(tab),
+                   Proportion = as.numeric(tab) / sum(tab), stringsAsFactors = FALSE)
+    }
+
+    bar_plot <- function(df, title) {
+        p <- plotly::plot_ly(df, x = ~Class, y = ~Number, type = "bar",
+                             text = ~paste0(Number, " (", round(Proportion * 100, 1), "%)"),
+                             textposition = "auto")
+        plotly::layout(p, title = title, xaxis = list(title = ""),
+                       yaxis = list(title = "number of CpGs"),
+                       margin = list(b = 90, t = 50))
+    }
+
+    ui <- shiny::fluidPage(
+        theme = .champ_gui_theme(),
+        shiny::tags$head(shiny::tags$style(
+            "#chr, #cgi, #feature, #type {height:42vh !important;}")),
+        shiny::titlePanel(paste0("CpG Overview (", nrow(ann), " probes)")),
+        shiny::tabsetPanel(
+            shiny::tabPanel("Chromosome", plotly::plotlyOutput("chr")),
+            shiny::tabPanel("CpG island", plotly::plotlyOutput("cgi")),
+            shiny::tabPanel("Feature", plotly::plotlyOutput("feature")),
+            shiny::tabPanel("Probe type", plotly::plotlyOutput("type")),
+            shiny::tabPanel("Annotation", DT::dataTableOutput("table"))
+        )
+    )
+
+    server <- function(input, output, session) {
+        output$chr <- plotly::renderPlotly(bar_plot(counts(ann$CHR), "Chromosome"))
+        output$cgi <- plotly::renderPlotly(bar_plot(counts(ann$cgi), "CpG island relation"))
+        output$feature <- plotly::renderPlotly(bar_plot(counts(ann$feature), "Genomic feature"))
+        output$type <- plotly::renderPlotly(bar_plot(counts(ann$Type), "Infinium design"))
+        output$table <- DT::renderDataTable({
+            cols <- intersect(c("CHR", "MAPINFO", "gene", "feature", "cgi", "Type"),
+                              colnames(ann))
+            DT::datatable(data.frame(Probe = rownames(ann), ann[, cols, drop = FALSE],
+                                     check.names = FALSE),
+                          rownames = FALSE, options = list(pageLength = 20))
+        })
+    }
+
+    app <- shiny::shinyApp(ui = ui, server = server)
+    talk("[<<<<<< CpG.GUI END >>>>>>>>>]")
+    if (!isTRUE(runApp)) return(app)
+    invisible(shiny::runApp(app))
 }

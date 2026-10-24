@@ -1,191 +1,236 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("Anno","myImport","read.csv"))
+# =============================================================================
+#  champ.import -- read Illumina IDAT files with the "ChAMP" (annotation based)
+#  method.  No minfi involvement, which makes this path usable on every
+#  supported R / Bioconductor combination.
+# =============================================================================
 
-champ.import <- function(directory = getwd(),
-                         offset = 100,
-                         arraytype="450K")
-{
-  message("[===========================]")
-  message("[<<<< ChAMP.IMPORT START >>>>>]")
-  message("-----------------------------")
-  
-  message("\n[ Section 1: Read PD Files Start ]")
-  if(!file.exists(directory) || is.na(file.info(directory)$isdir) || file.info(directory)$isdir == FALSE)
-  {
-    stop("  Your 'directory' for loading does not exists, please assign a correct directory.")
-  }
-  csvfile <- list.files(directory,recursive=TRUE,pattern="csv$",full.names=TRUE)
-  if(length(csvfile) == 0) {
-    stop(paste("  champ.import can not find any csv file in ",directory,". Please check your folder."))
-  } else if (length(csvfile)>=2) {
-    stop(paste("  champ.import finds more than one csv file in ",directory,". Please check your folder."))
-  }
-  
-  message("  CSV Directory: ",csvfile)
-  message("  Find CSV Success")
-  
-  message("  Reading CSV File")
-  
-  skipline <- which(substr(readLines(csvfile),1,6) == "[Data]")
-  if(length(skipline)==0)
-    suppressWarnings(pd <- read.csv(csvfile,stringsAsFactor=FALSE,header=TRUE))
-  else
-    suppressWarnings(pd <- read.csv(csvfile,skip=skipline,stringsAsFactor=FALSE,header=TRUE))
-  
-  if("Sentrix_Position" %in% colnames(pd))
-  {
-    colnames(pd)[which(colnames(pd)=="Sentrix_Position")] <- "Array"
-    message("  Replace Sentrix_Position into Array")
-  } else 
-  {
-    message("  Your pd file contains NO Array(Sentrix_Position) information.")
-  }
-  
-  if("Sentrix_ID" %in% colnames(pd))
-  {
-    colnames(pd)[which(colnames(pd)=="Sentrix_ID")] <- "Slide"
-    pd$Slide <- as.character(pd$Slide)
-    message("  Replace Sentrix_ID into Slide")
-  } else 
-  {
-    message("  Your pd file contains NO Slide(Sentrix_ID) information.")
-  }
-  
-  sapply(c("Pool_ID", "Sample_Plate", "Sample_Well"),function(x) if(x %in% colnames(pd)) pd[,x] <- as.character(pd[,x]) else message("  There is NO ",x, " in your pd file."))
-  
-  GrnPath <- unlist(sapply(paste(pd$Slide,pd$Array,"Grn.idat",sep="_"), function(x) grep(x,list.files(directory,recursive=T,full.names=TRUE), value = TRUE)))
-  RedPath <- unlist(sapply(paste(pd$Slide,pd$Array,"Red.idat",sep="_"), function(x) grep(x,list.files(directory,recursive=T,full.names=TRUE), value = TRUE)))
-  if(!identical(names(GrnPath),paste(pd$Slide,pd$Array,"Grn.idat",sep="_")))
-    stop("  Error Match between pd file and Green Channel IDAT file.")
-  if(!identical(names(RedPath),paste(pd$Slide,pd$Array,"Red.idat",sep="_")))
-    stop("  Error Match between pd file and Red Channel IDAT file.")
-  
-  message("[ Section 1: Read PD file Done ]")
-  
-  message("\n\n[ Section 2: Read IDAT files Start ]")
-  
-  count <- 1
-  G.idats <- lapply(GrnPath, function(x){ message("  Loading:",x," ---- (",which(GrnPath == x),"/",length(GrnPath),")");readIDAT(x)})
-  count <- 1
-  R.idats <- lapply(RedPath, function(x){ message("  Loading:",x," ---- (",which(RedPath == x),"/",length(RedPath),")");readIDAT(x)})
-  
-  names(G.idats) <- pd$Sample_Name
-  names(R.idats) <- pd$Sample_Name
-  
-  checkunique <- unique(c(sapply(G.idats, function(x) nrow(x$Quants)),sapply(R.idats, function(x) nrow(x$Quants))))
-  
-  if(length(checkunique) > 1) 
-  {
-    message("\n  !!! Important !!! ")
-    message("  Seems your IDAT files not from one Array, because they have different numbers of probe.")
-    message("  ChAMP wil continue analysis with only COMMON CpGs exist across all your IDAt files. However we still suggest you to check your source of data.\n")
-  }
-  
-  CombineIDAT <- append(G.idats, R.idats)
-  commonAddresses <- as.character(Reduce("intersect", lapply(CombineIDAT, function(x) rownames(x$Quants))))
-  
-  message("\n  Extract Mean value for Green and Red Channel Success")
-  GreenMean <- do.call(cbind, lapply(G.idats, function(xx) xx$Quants[commonAddresses, "Mean"]))
-  RedMean <- do.call(cbind, lapply(R.idats, function(xx) xx$Quants[commonAddresses, "Mean"]))
-  message("    Your Red Green Channel contains ",nrow(GreenMean)," probes.")
-  
-  G.Load <- do.call(cbind,lapply(G.idats,function(x) x$Quants[commonAddresses,"Mean"]))
-  R.Load <- do.call(cbind,lapply(R.idats,function(x) x$Quants[commonAddresses,"Mean"]))
-  
-  message("[ Section 2: Read IDAT Files Done ]")
-  
-  message("\n\n[ Section 3: Use Annotation Start ]")
-  
-  message("\n  Reading ", arraytype, " Annotation >>")
-  if(arraytype %in% c("EPIC", "EPICv2")) {
-    message("    !!! Important, since version 2.29.1, ChAMP set default `EPIC` arraytype as EPIC version 2. ",
-            "\n        You can set 'EPIC' or 'EPICv2' to use version 2 EPIC annotation",
-            "\n        If you want to use the old version (v1), please specify arraytype parameter as `EPICv1`. ",
-            "\n        For 450K array, still use `450K`")
-    data("AnnoEPICv2")
-  } else if(arraytype == "EPICv1") {
-    data("AnnoEPICv1")
-  } else { 
-    data(Anno450K)
-  }
-  
-  message("\n  Fetching NEGATIVE ControlProbe.")
-  control_probe <- rownames(Anno$ControlProbe)[which(Anno$ControlProbe[,1]=="NEGATIVE")]
-  message("    Totally, there are ",length(control_probe)," control probes in Annotation.")
-  control_probe <- control_probe[control_probe %in% rownames(R.Load)]
-  message("    Your data set contains ",length(control_probe)," control probes.")
-  rMu <- matrixStats::colMedians(R.Load[control_probe,])
-  rSd <- matrixStats::colMads(R.Load[control_probe,])
-  gMu <- matrixStats::colMedians(G.Load[control_probe,])
-  gSd <- matrixStats::colMads(G.Load[control_probe,])
-  
-  rownames(G.Load) <- paste("G",rownames(G.Load),sep="-")
-  rownames(R.Load) <- paste("R",rownames(R.Load),sep="-")
-  
-  IDAT <- rbind(G.Load,R.Load)
-  
-  message("\n  Generating Meth and UnMeth Matrix")
-  
-  message("    Extracting Meth Matrix...")
-  M.check <- Anno$Annotation[,"M.index"] %in% rownames(IDAT)
-  message("      Totally there are ",nrow(Anno$Annotation)," Meth probes in ",arraytype," Annotation.")
-  message("      Your data set contains ",length(M.check), " Meth probes.")
-  M <- IDAT[Anno$Annotation[,"M.index"][M.check],]
-  
-  message("    Extracting UnMeth Matrix...")
-  U.check <- Anno$Annotation[,"U.index"] %in% rownames(IDAT)
-  message("      Totally there are ",nrow(Anno$Annotation)," UnMeth probes in ",arraytype," Annotation.")
-  message("      Your data set contains ",length(U.check), " UnMeth probes.")
-  U <- IDAT[Anno$Annotation[,"U.index"][U.check],]
-  
-  if(!identical(M.check,U.check))
-  {
-    stop("  Meth Matrix and UnMeth Matrix seems not paried correctly.")
-  } else {
-    CpG.index <- Anno$Annotation[,"CpG"][M.check]
-  }
-  
-  rownames(M) <- CpG.index
-  rownames(U) <- CpG.index
-  
-  
-  message("\n  Generating beta Matrix")
-  BetaValue <- M / (M + U + offset)
-  message("  Generating M Matrix")
-  MValue <- log2(M/U)
-  message("  Generating intensity Matrix")
-  intensity <-  M + U
-  
-  message("  Calculating Detect P value")
-  detP <- matrix(NA,nrow=nrow(intensity),ncol=ncol(intensity))
-  rownames(detP) <- rownames(intensity)
-  colnames(detP) <- colnames(intensity)
-  
-  type_II <- rownames(Anno$Annotation)[Anno$Annotation[,"Channel"] == "g+r"]
-  type_II <- type_II[type_II %in% rownames(detP)]
-  type_I.red <- rownames(Anno$Annotation)[Anno$Annotation[,"Channel"] == "r"]
-  type_I.red <- type_I.red[type_I.red %in% rownames(detP)]
-  type_I.grn <- rownames(Anno$Annotation)[Anno$Annotation[,"Channel"] == "g"]
-  type_I.grn <- type_I.grn[type_I.grn %in% rownames(detP)]
-  for(i in 1:ncol(detP))
-  {
-    detP[type_II,i] <- 1 - pnorm(intensity[type_II,i], mean=rMu[i]+gMu[i], sd=rSd[i]+gSd[i])
-    detP[type_I.red,i] <- 1 - pnorm(intensity[type_I.red,i], mean=rMu[i]*2, sd=rSd[i]*2)
-    detP[type_I.grn,i] <- 1 - pnorm(intensity[type_I.grn,i], mean=gMu[i]*2, sd=gSd[i]*2)
-  }
-  if(sum(is.na(detP))) message("    !!! There are NA values in your detP matrix.\n")
-  
-  
-  message("  Counting Beads")
-  NBeads <- do.call(cbind, lapply(R.idats, function(x) x$Quants[commonAddresses, "NBeads"]))
-  Mbead <- NBeads[substr(Anno$Annotation$M.index[M.check],3,100),]
-  Ubead <- NBeads[substr(Anno$Annotation$U.index[U.check],3,100),]
-  Ubead[Ubead < 3 | Mbead < 3] <- NA
-  rownames(Ubead) <- rownames(intensity)
-  
-  message("[ Section 3: Use Annotation Done ]")
-  message("\n[<<<<< ChAMP.IMPORT END >>>>>>]")
-  message("[===========================]")
-  message("[You may want to process champ.filter() next.]\n")
-  
-  return(list("beta"=BetaValue,"M"=MValue,"pd"=pd,"intensity"=intensity,"detP"=detP,"beadcount"=Ubead,"Meth"=M,"UnMeth"=U))
+#' Import Illumina IDAT files using the ChAMP annotation
+#'
+#' Reads a sample sheet and the matching Grn/Red IDAT files, and returns beta
+#' values, M values, intensities, detection p-values and bead counts.
+#'
+#' @param directory directory containing the sample sheet (csv) and IDAT files.
+#' @param offset offset added to the denominator when computing beta values.
+#' @param arraytype "450K", "EPICv1" or "EPICv2" ("EPIC" is an alias of
+#'   "EPICv2").
+#' @param verbose print progress.
+#'
+#' @return list with beta, M, pd, intensity, detP, beadcount, Meth, UnMeth,
+#'   arraytype.
+#' @export
+champ.import <- function(directory = getwd(), offset = 100, arraytype = "450K",
+                         verbose = TRUE) {
+    .champ_msg("[===========================]")
+    .champ_msg("[<<<< ChAMP.IMPORT START >>>>>]")
+    .champ_msg("-----------------------------")
+    at <- .champ_arraytype(arraytype)
+    .champ_require("illuminaio", "champ.import()")
+
+    .champ_msg("\n[ Section 1: Read PD Files Start ]")
+    if (!dir.exists(directory)) {
+        .champ_stop("  Your 'directory' for loading does not exist: ", directory)
+    }
+    csvfile <- list.files(directory, recursive = TRUE, pattern = "[.]csv$",
+                          full.names = TRUE, ignore.case = TRUE)
+    if (length(csvfile) == 0L) {
+        .champ_stop("  champ.import can not find any csv file in ", directory, ".")
+    } else if (length(csvfile) > 1L) {
+        .champ_stop("  champ.import finds more than one csv file in ", directory, ".")
+    }
+    .champ_msg("  CSV Directory: ", csvfile)
+
+    lines <- readLines(csvfile, warn = FALSE)
+    skipline <- which(substr(trimws(lines), 1L, 6L) == "[Data]")
+    pd <- suppressWarnings(utils::read.csv(csvfile, skip = skipline,
+                                           header = TRUE,
+                                           stringsAsFactors = FALSE))
+    if (!is.data.frame(pd) || nrow(pd) == 0L) {
+        .champ_stop("  The sample sheet ", csvfile, " contains no data.")
+    }
+
+    if ("Sentrix_Position" %in% colnames(pd)) {
+        colnames(pd)[colnames(pd) == "Sentrix_Position"] <- "Array"
+        .champ_msg("  Replace Sentrix_Position into Array")
+    }
+    if ("Sentrix_ID" %in% colnames(pd)) {
+        colnames(pd)[colnames(pd) == "Sentrix_ID"] <- "Slide"
+        pd$Slide <- as.character(pd$Slide)
+        .champ_msg("  Replace Sentrix_ID into Slide")
+    }
+    for (nm in c("Pool_ID", "Sample_Plate", "Sample_Well", "Sample_Name", "Sample_Group")) {
+        if (nm %in% colnames(pd)) pd[[nm]] <- as.character(pd[[nm]])
+    }
+    if (!all(c("Slide", "Array") %in% colnames(pd))) {
+        .champ_stop("  Your sample sheet must contain Slide (Sentrix_ID) and Array (Sentrix_Position).")
+    }
+    if (!"Sample_Name" %in% colnames(pd)) {
+        pd$Sample_Name <- paste(pd$Slide, pd$Array, sep = "_")
+    }
+
+    .champ_msg("[ Section 1: Read PD file Done ]")
+    .champ_msg("\n[ Section 2: Read IDAT files Start ]")
+
+    all_files <- list.files(directory, recursive = TRUE, full.names = TRUE,
+                            pattern = "[.]idat$", ignore.case = TRUE)
+    grn_idx <- grep("_Grn[.]idat$", all_files, ignore.case = TRUE)
+    red_idx <- grep("_Red[.]idat$", all_files, ignore.case = TRUE)
+    grn_files <- all_files[grn_idx]
+    red_files <- all_files[red_idx]
+    names(grn_files) <- sub("_Grn[.]idat$", "", basename(grn_files), ignore.case = TRUE)
+    names(red_files) <- sub("_Red[.]idat$", "", basename(red_files), ignore.case = TRUE)
+
+    key <- paste(pd$Slide, pd$Array, sep = "_")
+    GrnPath <- grn_files[key]
+    RedPath <- red_files[key]
+    if (anyNA(GrnPath) || anyNA(RedPath)) {
+        missing <- key[is.na(GrnPath) | is.na(RedPath)]
+        .champ_stop("  No matching IDAT files were found for: ",
+                    paste(utils::head(missing, 5L), collapse = ", "),
+                    "\n  Found ", length(grn_files), " Grn and ",
+                    length(red_files), " Red IDAT files.")
+    }
+
+    read_one <- function(path, tag) {
+        .champ_msg("  Loading ", tag, ": ", basename(path))
+        illuminaio::readIDAT(path)
+    }
+    G.idats <- lapply(GrnPath, read_one, tag = "Grn")
+    R.idats <- lapply(RedPath, read_one, tag = "Red")
+    names(G.idats) <- pd$Sample_Name
+    names(R.idats) <- pd$Sample_Name
+
+    commonAddresses <- as.character(Reduce(intersect,
+        lapply(c(G.idats, R.idats), function(x) rownames(x$Quants))))
+    if (!length(commonAddresses)) {
+        .champ_stop("  The IDAT files have no addresses in common.")
+    }
+
+    GreenMean <- do.call(cbind, lapply(G.idats, function(x)
+        x$Quants[commonAddresses, "Mean"]))
+    RedMean <- do.call(cbind, lapply(R.idats, function(x)
+        x$Quants[commonAddresses, "Mean"]))
+    .champ_msg("    Your Red Green Channel contains ", nrow(GreenMean), " probes.")
+    .champ_msg("[ Section 2: Read IDAT Files Done ]")
+
+    .champ_msg("\n[ Section 3: Use Annotation Start ]")
+    .champ_msg("\n  Reading ", at, " Annotation >>")
+    anno_name <- switch(at,
+        "450K"   = "Anno450K",
+        "EPICv1" = "AnnoEPICv1",
+        "EPICv2" = "AnnoEPICv2",
+        "27K"    = "Anno450K",
+        .champ_stop("champ.import() supports 450K, EPICv1 and EPICv2."))
+    Anno <- .champ_data_object(anno_name)
+    if (!is.list(Anno) || is.null(Anno$Annotation)) {
+        .champ_stop("  ", anno_name, " does not contain an $Annotation table.")
+    }
+    annotation <- as.data.frame(Anno$Annotation, stringsAsFactors = FALSE)
+    cpg_col <- intersect(c("CpG", "Name", "IlmnID", "probeID"), colnames(annotation))
+    if (length(cpg_col)) {
+        annotation$CpG <- as.character(annotation[[cpg_col[1L]]])
+    } else if (!is.null(rownames(Anno$Annotation))) {
+        annotation$CpG <- rownames(Anno$Annotation)
+    } else {
+        .champ_stop("  ", anno_name, " has no CpG identifier column.")
+    }
+    for (nm in c("M.index", "U.index", "Channel")) {
+        if (!nm %in% colnames(annotation)) {
+            .champ_stop("  ", anno_name, " is missing the '", nm, "' column.")
+        }
+    }
+
+    control_probe <- character(0)
+    if (!is.null(Anno$ControlProbe)) {
+        cp <- as.data.frame(Anno$ControlProbe, stringsAsFactors = FALSE)
+        control_probe <- rownames(cp)[cp[, 1L] == "NEGATIVE"]
+        control_probe <- control_probe[control_probe %in% rownames(RedMean)]
+        .champ_msg("    ", length(control_probe), " negative control probes found.")
+    }
+
+    R.Load <- RedMean
+    G.Load <- GreenMean
+    rownames(G.Load) <- paste0("G-", rownames(G.Load))
+    rownames(R.Load) <- paste0("R-", rownames(R.Load))
+    IDAT <- rbind(G.Load, R.Load)
+
+    if (!length(control_probe)) {
+        ## fall back to a robust background estimate
+        rMu <- rep(stats::median(RedMean), ncol(RedMean))
+        rSd <- rep(stats::mad(as.vector(RedMean)), ncol(RedMean))
+        gMu <- rep(stats::median(GreenMean), ncol(GreenMean))
+        gSd <- rep(stats::mad(as.vector(GreenMean)), ncol(GreenMean))
+    } else {
+        rMu <- .champ_col_medians(R.Load[control_probe, , drop = FALSE])
+        rSd <- .champ_col_mads(R.Load[control_probe, , drop = FALSE])
+        gMu <- .champ_col_medians(G.Load[control_probe, , drop = FALSE])
+        gSd <- .champ_col_mads(G.Load[control_probe, , drop = FALSE])
+    }
+    rSd[!is.finite(rSd) | rSd <= 0] <- 1
+    gSd[!is.finite(gSd) | gSd <= 0] <- 1
+
+    .champ_msg("\n  Generating Meth and UnMeth Matrix")
+    m_ok <- annotation$M.index %in% rownames(IDAT)
+    u_ok <- annotation$U.index %in% rownames(IDAT)
+    if (!identical(m_ok, u_ok)) {
+        .champ_stop("  Meth and UnMeth matrices are not paired correctly.")
+    }
+    if (!any(m_ok)) .champ_stop("  None of the annotation addresses were found in the IDAT files.")
+    M <- IDAT[annotation$M.index[m_ok], , drop = FALSE]
+    U <- IDAT[annotation$U.index[m_ok], , drop = FALSE]
+    cpg_index <- annotation$CpG[m_ok]
+    keep <- !duplicated(cpg_index)
+    M <- M[keep, , drop = FALSE]
+    U <- U[keep, , drop = FALSE]
+    rownames(M) <- rownames(U) <- cpg_index[keep]
+
+    .champ_msg("\n  Generating beta Matrix")
+    BetaValue <- M / (M + U + offset)
+    .champ_msg("  Generating M Matrix")
+    MValue <- log2(M / U)
+    .champ_msg("  Generating intensity Matrix")
+    intensity <- M + U
+
+    .champ_msg("  Calculating Detect P value")
+    detP <- matrix(NA_real_, nrow = nrow(intensity), ncol = ncol(intensity),
+                   dimnames = dimnames(intensity))
+    channel <- annotation$Channel[m_ok][keep]
+    type_II   <- rownames(detP)[channel == "g+r"]
+    type_I_g  <- rownames(detP)[channel %in% c("g", "Grn", "G")]
+    type_I_r  <- rownames(detP)[channel %in% c("r", "Red", "R")]
+    for (i in seq_len(ncol(detP))) {
+        if (length(type_II)) {
+            detP[type_II, i] <- 1 - stats::pnorm(intensity[type_II, i],
+                                                 mean = rMu[i] + gMu[i],
+                                                 sd = rSd[i] + gSd[i])
+        }
+        if (length(type_I_r)) {
+            detP[type_I_r, i] <- 1 - stats::pnorm(intensity[type_I_r, i],
+                                                  mean = rMu[i] * 2, sd = rSd[i] * 2)
+        }
+        if (length(type_I_g)) {
+            detP[type_I_g, i] <- 1 - stats::pnorm(intensity[type_I_g, i],
+                                                  mean = gMu[i] * 2, sd = gSd[i] * 2)
+        }
+    }
+    detP[detP < 0] <- 0
+    if (anyNA(detP)) .champ_msg("    !!! There are NA values in your detP matrix.")
+
+    .champ_msg("  Counting Beads")
+    NBeads <- do.call(cbind, lapply(R.idats, function(x)
+        x$Quants[commonAddresses, "NBeads"]))
+    m_addr <- sub("^[GR]-", "", annotation$M.index[m_ok][keep])
+    u_addr <- sub("^[GR]-", "", annotation$U.index[m_ok][keep])
+    Mbead <- NBeads[m_addr, , drop = FALSE]
+    Ubead <- NBeads[u_addr, , drop = FALSE]
+    Ubead[Ubead < 3 | Mbead < 3] <- NA_real_
+    rownames(Ubead) <- rownames(intensity)
+
+    .champ_msg("[ Section 3: Use Annotation Done ]")
+    .champ_msg("\n[<<<<< ChAMP.IMPORT END >>>>>>]")
+    .champ_msg("[===========================]")
+    .champ_msg("[You may want to process champ.filter() next.]\n")
+
+    list(beta = BetaValue, M = MValue, pd = pd, intensity = intensity,
+         detP = detP, beadcount = Ubead, Meth = M, UnMeth = U,
+         arraytype = at)
 }

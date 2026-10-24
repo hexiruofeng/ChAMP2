@@ -1,336 +1,269 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("sampleNames<-","EPIC.manifest.hg19","EPIC.manifest.pop.hg19","hm450.manifest.hg19","hm450.manifest.pop.hg19","multi.hit","probe.features","probe.features.epic"))
+# =============================================================================
+#  champ.filter -- probe / sample filtering for beta (or M) matrices
+# =============================================================================
 
+#' Filter a methylation matrix
+#'
+#' Applies ChAMP's standard filtering steps to a beta (or M) value matrix:
+#' detection p-value filtering, optional KNN imputation, bead count filtering,
+#' non-CpG removal, SNP masking, multi-hit removal and sex chromosome removal.
+#'
+#' @param beta beta value matrix (probes x samples); can be NULL when M is
+#'   given.
+#' @param M M value matrix; can be NULL when beta is given.
+#' @param pd sample sheet.
+#' @param intensity,Meth,UnMeth optional matrices that are filtered alongside.
+#' @param detP detection p-value matrix.
+#' @param beadcount bead count matrix.
+#' @param autoimpute impute remaining missing values (KNN, k = 5).
+#' @param filterDetP,filterBeads,filterNoCG,filterSNPs,filterMultiHit,filterXY
+#'   toggles for the individual filters.
+#' @param ProbeCutoff fraction of samples that may fail for a probe (0 removes
+#'   any probe failing in one sample).
+#' @param SampleCutoff fraction of failed probes above which a sample is
+#'   removed.
+#' @param detPcut detection p-value threshold.
+#' @param beadCutoff fraction of samples with bead count < 3 above which a
+#'   probe is removed.
+#' @param population SNP mask population (e.g. "EUR", "AFR"); NULL uses the
+#'   general mask.
+#' @param fixOutlier replace exact 0/1 beta values.
+#' @param arraytype "450K", "EPICv1" or "EPICv2".
+#' @param verbose print progress.
+#'
+#' @return list of the filtered matrices plus pd.
+#' @export
+champ.filter <- function(beta = NULL, M = NULL, pd = NULL, intensity = NULL,
+                         Meth = NULL, UnMeth = NULL, detP = NULL,
+                         beadcount = NULL, autoimpute = TRUE,
+                         filterDetP = TRUE, ProbeCutoff = 0, SampleCutoff = 0.1,
+                         detPcut = 0.01, filterBeads = TRUE, beadCutoff = 0.05,
+                         filterNoCG = TRUE, filterSNPs = TRUE, population = NULL,
+                         filterMultiHit = TRUE, filterXY = TRUE, fixOutlier = TRUE,
+                         arraytype = "450K", verbose = TRUE) {
+    .champ_msg("[===========================]")
+    .champ_msg("[<<<< ChAMP.FILTER START >>>>>]")
+    .champ_msg("-----------------------------")
+    at <- .champ_arraytype(arraytype)
 
-champ.filter <- function(beta=myImport$beta,
-                         M=NULL,
-                         pd=myImport$pd,
-                         intensity=NULL,
-                         Meth=NULL,
-                         UnMeth=NULL,
-                         detP=NULL,
-                         beadcount=NULL,
-                         autoimpute=TRUE,
-                         filterDetP=TRUE,
-                         ProbeCutoff=0,
-                         SampleCutoff=0.1,
-                         detPcut=0.01,
-                         filterBeads=TRUE,
-                         beadCutoff=0.05,
-                         filterNoCG = TRUE,
-                         filterSNPs = TRUE, 
-                         population = NULL,
-                         filterMultiHit = TRUE,
-                         filterXY = TRUE, 
-                         fixOutlier = TRUE,
-                         arraytype = "450K")
-{
-  message("[===========================]")
-  message("[<<<< ChAMP.FILTER START >>>>>]")
-  message("-----------------------------")
-  
-  message("\nIn New version ChAMP, champ.filter() function has been set to do filtering on the result of champ.import(). You can use champ.import() + champ.filter() to do Data Loading, or set \"method\" parameter in champ.load() as \"ChAMP\" to get the same effect.")
-  
-  message("\nThis function is provided for user need to do filtering on some beta (or M) matrix, which contained most filtering system in champ.load except beadcount. User need to input beta matrix, pd file themselves. If you want to do filterintg on detP matrix and Bead Count, you also need to input a detected P matrix and Bead Count information.")
-  
-  message("\nNote that if you want to filter more data matrix, say beta, M, intensity... please make sure they have exactly the same rownames and colnames.")
-  
-  message("\n\n[ Section 1:  Check Input Start ]")
-  
-  Objects <- list("beta"=beta,
-                  "M"=M,
-                  "intensity"=intensity,
-                  "Meth"=Meth,
-                  "UnMeth"=UnMeth)
-  
-  Objects <- Objects[which(lapply(Objects,FUN=is.null)==FALSE)]
-  if(length(Objects)==0) stop("  At least one Data Set needed.")
-  message("  You have inputed ",paste(names(Objects),collapse=",")," for Analysis.")
-  if(length(unique(lapply(Objects,FUN=rownames))) != 1) stop("  !!!  You objects have different rownames. Please make sure your Matrix are in accord on Rows.")
-  if(length(unique(lapply(Objects,FUN=colnames))) != 1) stop("  !!!  You objects have different colnames. Please make sure your Matrix are in accord on Rows.")
-  
-  Accessory <- list("detP"=detP,
-                    "beadcount"=beadcount)
-  
-  FilterOption <- list("filterDetP"=filterDetP,
-                       "autoimpute"=autoimpute,
-                       "filterBeads"=filterBeads,
-                       "filterMultiHit"=filterMultiHit,
-                       "filterSNPs"=filterSNPs,
-                       "filterNoCG"=filterNoCG,
-                       "filterXY"=filterXY)
-  
-  ### Checking pd file
-  if(!is.null(pd)) {
-    message("\n  pd file provided, checking if it's in accord with Data Matrix...")
-    if(nrow(pd) == ncol(Objects[[1]])) {
-      if("Sample_Name" %in% names(pd)){
-        if(identical(as.character(pd$Sample_Name),colnames(Objects[[1]]))) 
-          message("    pd file check success.")
-        else
-          stop("    Your pd file's Sample_Name is different from your Data Matrix colnames.")
-      } else {
-        message("    !!! Your pd file does not have Sample_Name column, we can not check your Sample_Name, please make sure the pd file is correct.")
-      }
-    } else {
-      stop("    pd file and Data matrix have different dimentions.")
+    .champ_msg("\n[ Section 1:  Check Input Start ]")
+    Objects <- list(beta = beta, M = M, intensity = intensity,
+                    Meth = Meth, UnMeth = UnMeth)
+    Objects <- Objects[!vapply(Objects, is.null, logical(1L))]
+    if (!length(Objects)) .champ_stop("  At least one data matrix is required.")
+    .champ_msg("  You have inputed ", paste(names(Objects), collapse = ","), " for Analysis.")
+    if (length(unique(lapply(Objects, rownames))) != 1L ||
+        length(unique(lapply(Objects, colnames))) != 1L) {
+        .champ_stop("  Your objects have different rownames/colnames. ",
+                    "Please make sure they are in accord.")
     }
-  }
-  
-  ### Checking Detect P value
-  if(FilterOption$filterDetP == TRUE)
-  {
-    message("\n  Parameter filterDetP is TRUE, checking if detP in accord with Data Matrix...")
-    if(!is.null(Accessory$detP)) {
-      if(identical(rownames(Accessory$detP),rownames(Objects[[1]])) & identical(colnames(Accessory$detP),colnames(Objects[[1]])))
-      {
-        message("    detP check success.")
-      }
-      else {
-        message("    !!! Your detP does not have the EXACT same rowname and colname as Data Matrix.")
-        message("    !!! filterDetP can not be done. filterDetP is reset FALSE now.")
-        FilterOption$filterDetP <- FALSE
-        Accessory$detP <- NULL
-      }  
-    } else {
-      message("    !!! Parameter detP is not found, filterDetP is reset FALSE now.")
-      FilterOption$filterDetP <- FALSE
-      Accessory$detP <- NULL
+    Objects <- lapply(Objects, function(x) {
+        x <- as.matrix(x)
+        storage.mode(x) <- "double"
+        x
+    })
+
+    FilterOption <- list(filterDetP = isTRUE(filterDetP),
+                         autoimpute = isTRUE(autoimpute),
+                         filterBeads = isTRUE(filterBeads),
+                         filterNoCG = isTRUE(filterNoCG),
+                         filterSNPs = isTRUE(filterSNPs),
+                         filterMultiHit = isTRUE(filterMultiHit),
+                         filterXY = isTRUE(filterXY))
+
+    if (!is.null(pd)) {
+        .champ_msg("\n  pd file provided, checking if it is in accord with the data...")
+        if (nrow(pd) != ncol(Objects[[1L]])) {
+            .champ_stop("    pd file and data matrix have different dimensions.")
+        }
+        if ("Sample_Name" %in% names(pd) &&
+            !identical(as.character(pd$Sample_Name), colnames(Objects[[1L]]))) {
+            .champ_stop("    Your pd file's Sample_Name differs from the matrix colnames.")
+        }
+        .champ_msg("    pd file check success.")
     }
-  }
-  
-  ### Checking Beadcount value
-  if(FilterOption$filterBeads == TRUE)
-  {
-    message("\n  Parameter filterBeads is TRUE, checking if beadcount in accord with Data Matrix...")
-    if(!is.null(Accessory$beadcount)) {
-      if(identical(rownames(Accessory$beadcount),rownames(Objects[[1]])) & identical(colnames(Accessory$beadcount),colnames(Objects[[1]])))
-      {
-        message("    beadcount check success.")
-      }
-      else {
-        message("    !!! Your beadcount does not have the EXACT same rowname and colname as Data Matrix.")
-        message("    !!! filterBeads can not be done. filterBeads is reset FALSE now.")
-        FilterOption$filterBeads <- FALSE
-        Accessory$beadcount <- NULL
-      }  
-    } else {
-      message("    !!! Parameter beadcount is not found, filterBeads is reset FALSE now.")
-      FilterOption$filterBeads <- FALSE
-      Accessory$beadcount <- NULL
+
+    if (isTRUE(FilterOption$filterDetP)) {
+        if (is.null(detP)) {
+            .champ_msg("    !!! detP not supplied; filterDetP is set to FALSE.")
+            FilterOption$filterDetP <- FALSE
+        } else if (!identical(dim(detP), dim(Objects[[1L]]))) {
+            .champ_msg("    !!! detP does not match the data matrix; filterDetP is set to FALSE.")
+            FilterOption$filterDetP <- FALSE
+        } else {
+            detP <- detP[rownames(Objects[[1L]]), colnames(Objects[[1L]]), drop = FALSE]
+        }
     }
-  }
-  
-  if(FilterOption$autoimpute == TRUE)
-  {
-    message("\n  parameter autoimpute is TRUE. Checking if the conditions are fulfilled...")
-    if("beta" %in% names(Objects) | "M" %in% names(Objects)){
-      if(ProbeCutoff > 0 & !is.null(detP)) {
-        message("    autoimpute check success.")
-      } else {
-        message("    !!! ProbeCutoff is 0, which means you have no needs to do imputation. autoimpute has been reset FALSE.")
-        FilterOption$autoimpute <- FALSE
-      }
-    } else {
-      message("    !!! beta matrix or M matrix are required for impute. autoimpute has been reset FALSE.")
-      FilterOption$autoimpute <- FALSE
+    if (isTRUE(FilterOption$filterBeads)) {
+        if (is.null(beadcount)) {
+            .champ_msg("    !!! beadcount not supplied; filterBeads is set to FALSE.")
+            FilterOption$filterBeads <- FALSE
+        } else if (!identical(dim(beadcount), dim(Objects[[1L]]))) {
+            .champ_msg("    !!! beadcount does not match the data matrix; filterBeads is set to FALSE.")
+            FilterOption$filterBeads <- FALSE
+        } else {
+            beadcount <- beadcount[rownames(Objects[[1L]]), colnames(Objects[[1L]]), drop = FALSE]
+        }
     }
-  }
-  
-  if(sum(FilterOption==TRUE)>0) {
-    message("\n  Checking Finished :" , paste(names(which(FilterOption==TRUE)),collapse=",")," would be done on ", paste(names(Objects),collapse=","),".")
-  } else {
-    stop("  No Filtering would be done. Please check your input parameters.")
-  }
-  if(length(Accessory) > 0) {
-    message("  You also provided :", paste(names(Accessory),collapse=",")," .")
-  }
-  message("[ Section 1: Check Input Done ]")
-  
-  ### Start Filtering Here
-  message("\n\n[ Section 2: Filtering Start >>")
-  
-  if(FilterOption$filterDetP == TRUE)
-  {
-    message("\n  Filtering Detect P value Start")
-    message("    The fraction of failed positions per sample")
-    message("    You may need to delete samples with high proportion of failed probes:\n")
-    
-    numfail <- matrix(colMeans(Accessory$detP >= detPcut))
-    rownames(numfail) <- colnames(Accessory$detP)
-    colnames(numfail) <- "Failed CpG Fraction."
-    print(numfail)
-    RemainSample <- which(numfail < SampleCutoff)
-    
-    if(any(numfail >= SampleCutoff))
-    {
-      message("\n    The detSamplecut parameter is : ",SampleCutoff)
-      message("    Samples : ", paste(rownames(numfail)[which(numfail >= SampleCutoff)],collapse=",")," will be deleted.")
-      message("    There are ",length(RemainSample)," samples remained for analysis.")
-      Objects <- lapply(Objects,function(x) x[,RemainSample])
-      Accessory <- lapply(Accessory,function(x) x[,RemainSample])
+    if (isTRUE(FilterOption$autoimpute)) {
+        if (!any(c("beta", "M") %in% names(Objects))) {
+            .champ_msg("    !!! beta or M matrix is required for imputation; autoimpute is set to FALSE.")
+            FilterOption$autoimpute <- FALSE
+        } else if (!(ProbeCutoff > 0 && !is.null(detP))) {
+            .champ_msg("    !!! ProbeCutoff is 0, so there is nothing to impute; autoimpute is set to FALSE.")
+            FilterOption$autoimpute <- FALSE
+        }
     }
-    
-    RemainProbe <- rowSums(Accessory$detP > detPcut) <= ProbeCutoff * length(RemainSample)
-    if(ProbeCutoff==0)
-    {
-      message("\n    Filtering probes with a detection p-value above ",detPcut,".")
-      message("    Removing ",sum(RemainProbe==FALSE)," probes.")
-      message("    If a large number of probes have been removed, ChAMP suggests you to identify potentially bad samples")
-    } else {
-      message("\n    Filtering probes with a detection p-value above ",detPcut," in at least", ProbeCutoff*100,"% Samples.")
-      message("    Removing ",sum(RemainProbe==FALSE)," probes.")
-      message("    If a large number of probes have been removed, ChAMP suggests you to identify potentially bad samples")
+    if (sum(unlist(FilterOption)) == 0L) {
+        .champ_stop("  No filtering would be done. Please check your input parameters.")
     }
-    
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-    if(sum(Accessory$detP > detPcut) > 0) message("    There are still ",sum(Accessory$detP > detPcut), " failed probes exist in your data set, imputation is recommended.")
-  }
-  
-  
-  if(FilterOption$autoimpute == TRUE)
-  {
-    message("\n  Autoimpute Start") 
-    if(sum(Accessory$detP > detPcut) == 0) {
-      message("    No NAs (failed probes) exist in your data set any more, you don't need to do any imputation.")
-    } else
-    {
-      message("    There are ",sum(Accessory$detP > detPcut), " NAs (failed probes) exists in your data set.")
-      message("    Impute.knn will be conducted for remain NAs. (NOT suitable for small data sets)\n")
-      
-      ### Using sink function to remove messages
-      zz <- file("ImputeMessage.Rout", open="wt")
-      sink(zz)
-      sink(zz, type="message")
-      
-      if("beta" %in% names(Objects))
-      {
-        message("    Doing imputation on beta matrix.")
-        Objects$beta[Accessory$detP > detPcut] <- NA
-        Objects$beta <- suppressMessages(impute.knn(Objects$beta, k=5)$data)
-      }
-      if("M" %in% names(Objects))
-      {
-        message("    Doing imputation on M matrix.")
-        Objects$M[Accessory$detP > detPcut] <- NA
-        Objects$M <- suppressMessages(impute.knn(Objects$M,k=5)$data)
-      }
-      sink(type="message")
-      sink()
+    .champ_msg("  Checking Finished: ",
+               paste(names(which(unlist(FilterOption))), collapse = ","), " will be done.")
+    .champ_msg("[ Section 1: Check Input Done ]")
+
+    .champ_msg("\n\n[ Section 2: Filtering Start >>")
+    RemainSample <- seq_len(ncol(Objects[[1L]]))
+
+    if (FilterOption$filterDetP) {
+        .champ_msg("\n  Filtering Detect P value Start")
+        numfail <- matrix(colMeans(detP >= detPcut))
+        rownames(numfail) <- colnames(detP)
+        colnames(numfail) <- "Failed CpG Fraction."
+        print(numfail)
+        RemainSample <- which(numfail < SampleCutoff)
+        if (any(numfail >= SampleCutoff)) {
+            .champ_msg("\n    The detSamplecut parameter is : ", SampleCutoff)
+            .champ_msg("    Samples : ",
+                       paste(rownames(numfail)[numfail >= SampleCutoff], collapse = ","),
+                       " will be deleted.")
+            .champ_msg("    There are ", length(RemainSample), " samples remained for analysis.")
+            if (!length(RemainSample)) .champ_stop("    All samples were removed by detection p-value filtering.")
+            Objects <- lapply(Objects, function(x) x[, RemainSample, drop = FALSE])
+            detP <- detP[, RemainSample, drop = FALSE]
+            if (!is.null(beadcount)) beadcount <- beadcount[, RemainSample, drop = FALSE]
+        }
+
+        RemainProbe <- rowSums(detP > detPcut) <= ProbeCutoff * length(RemainSample)
+        .champ_msg("\n    Filtering probes with a detection p-value above ", detPcut,
+                   " in ", if (ProbeCutoff == 0) "one or more samples" else
+                       paste0("at least ", ProbeCutoff * 100, "% of samples"), ".")
+        .champ_msg("    Removing ", sum(!RemainProbe), " probes.")
+        Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+        detP <- detP[RemainProbe, , drop = FALSE]
+        if (!is.null(beadcount)) beadcount <- beadcount[RemainProbe, , drop = FALSE]
+        if (sum(detP > detPcut) > 0) {
+            .champ_msg("    There are still ", sum(detP > detPcut),
+                       " failed probes in your data set; imputation is recommended.")
+        }
     }
-  }
-  
-  if(FilterOption$filterBeads == TRUE)
-  {
-    message("\n  Filtering BeadCount Start")
-    RemainProbe <- rowSums(is.na(Accessory$beadcount)) < beadCutoff*(ncol(Accessory$beadcount))
-    message("    Filtering probes with a beadcount <3 in at least ",beadCutoff*100,"% of samples.")
-    message("    Removing ",sum(RemainProbe == FALSE)," probes")
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-  }
-  
-  if(FilterOption$filterNoCG == TRUE)
-  {
-    message("\n  Filtering NoCG Start")
-    RemainProbe <- substr(rownames(Objects[[1]]),1,2) == "cg"
-    message("    Only Keep CpGs, removing ", sum(RemainProbe == FALSE) ," probes from the analysis.")
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-  }
-  
-  if(FilterOption$filterSNPs== TRUE)
-  {
-    message("\n  Filtering SNPs Start")
-    if(arraytype %in% c("EPIC", "EPICv2")) {
-      message("\n    !!! Important, since version 2.29.1, ChAMP set default `EPIC` arraytype as EPIC version 2. ",
-              "\n        You can set 'EPIC' or 'EPICv2' to use version 2 EPIC annotation",
-              "\n        If you want to use the old version (v1), please specify arraytype parameter as `EPICv1`. ",
-              "\n        For 450K array, still use `450K`\n")
-      data("EPICv2_Mask")
-    } else if(arraytype == "EPICv1") {
-      data("EPICv1_Mask")
-    } else { 
-      data("Hm450K_Mask")
+
+    if (FilterOption$autoimpute) {
+        .champ_msg("\n  Autoimpute Start")
+        nfail <- sum(detP > detPcut)
+        if (nfail == 0L) {
+            .champ_msg("    No failed probes remain; no imputation is needed.")
+        } else {
+            .champ_msg("    There are ", nfail, " failed probes. KNN imputation (k = 5) starts.")
+            for (nm in intersect(c("beta", "M"), names(Objects))) {
+                .champ_msg("    Doing imputation on the ", nm, " matrix.")
+                Objects[[nm]][detP > detPcut] <- NA_real_
+                Objects[[nm]] <- champ_knn_impute(Objects[[nm]], k = 5L,
+                                                  strict = FALSE, verbose = verbose)
+            }
+        }
     }
-    
-    if(is.null(population)) {
-      message("    Using general mask options")
-      maskname <- rownames(Mask)[Mask$MASK_general]
-    } else if (paste0("MASK_general_", population) %in% colnames(Mask)) {
-      message("    Using ", population, " specific SNP option.")
-      maskname <- rownames(Mask)[Mask[, paste0("MASK_general_", population)]]
-    } else {
-      message("    Seems the population does not exist in this array annotation, using general options.")
-      maskname <- rownames(Mask)[Mask$MASK_general]
+
+    if (FilterOption$filterBeads) {
+        .champ_msg("\n  Filtering BeadCount Start")
+        RemainProbe <- rowSums(is.na(beadcount)) < beadCutoff * ncol(beadcount)
+        .champ_msg("    Filtering probes with a beadcount < 3 in at least ",
+                   beadCutoff * 100, "% of samples.")
+        .champ_msg("    Removing ", sum(!RemainProbe), " probes.")
+        Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+        detP <- detP[RemainProbe, , drop = FALSE]
+        beadcount <- beadcount[RemainProbe, , drop = FALSE]
     }
-    
-    RemainProbe <- !rownames(Objects[[1]]) %in% maskname
-    message("    Removing ", sum(RemainProbe == FALSE) ," probes from the analysis.")
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-  }
-  
-  
-  
-  if(FilterOption$filterMultiHit == TRUE)
-  {
-    message("\n  Filtering MultiHit Start")
-    data(multi.hit)
-    RemainProbe <- !rownames(Objects[[1]]) %in% multi.hit$TargetID
-    message("    Filtering probes that align to multiple locations as identified in Nordlund et al")
-    message("    Removing ", sum(RemainProbe == FALSE) ," probes from the analysis.")
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-  }
-  
-  
-  if(FilterOption$filterXY == TRUE)
-  {
-    message("\n  Filtering XY Start")
-    if(arraytype %in% c("EPIC", "EPICv2")) {
-      data("probe.features.epicv2")
-    } else if(arraytype == "EPICv1") {
-      data("probe.features.epicv1")
-    } else if(arraytype == "450K") { 
-      data("probe.features")
-    } else (
-      stop("arraytype must be `EPICv2`, `EPICv1`, `450K`")
-    )
-    
-    RemainProbe <- rownames(Objects[[1]]) %in% (rownames(probe.features)[!probe.features$CHR %in% c("X","Y", "chrX", "chrY")])
-    message("    Filtering probes located on X,Y chromosome, removing ", sum(RemainProbe == FALSE) ," probes from the analysis.")
-    Objects <- lapply(Objects,function(x) x[RemainProbe,])
-    Accessory <- lapply(Accessory,function(x) x[RemainProbe,])
-  }
-  
-  if(!is.null(pd))
-  {
-    message("\n  Updating PD file")
-    if(FilterOption$filterDetP==FALSE)
-    {
-      message("    filterDetP parameter is FALSE, so no Sample Would be removed.")
-      RemainSample <- 1:nrow(pd)
+
+    if (FilterOption$filterNoCG) {
+        .champ_msg("\n  Filtering NoCG Start")
+        RemainProbe <- substr(rownames(Objects[[1L]]), 1L, 2L) == "cg"
+        .champ_msg("    Only keeping CpGs, removing ", sum(!RemainProbe), " probes.")
+        Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+        detP <- detP[RemainProbe, , drop = FALSE]
+        if (!is.null(beadcount)) beadcount <- beadcount[RemainProbe, , drop = FALSE]
     }
-    pd <- pd[RemainSample,]
-    Objects <- append(Objects,list(pd=pd))
-  }
-  
-  if(fixOutlier & "beta" %in% names(Objects))
-  {
-    message("\n  Fixing Outliers Start")
-    message("    Replacing all value smaller/equal to 0 with smallest positive value.")
-    Objects$beta[Objects$beta <= 0] <- min(Objects$beta[which(Objects$beta > 0)])
-    message("    Replacing all value greater/equal to 1 with largest value below 1..")
-    Objects$beta[Objects$beta >= 1] <- max(Objects$beta[which(Objects$beta < 1)])
-  }
-  message("[ Section 2: Filtering Done ]")
-  
-  message("\n All filterings are Done, now you have ", nrow(Objects[[1]]), " probes and ",ncol(Objects[[1]]), " samples.\n")
-  
-  message("[<<<<< ChAMP.FILTER END >>>>>>]")
-  message("[===========================]")
-  message("[You may want to process champ.QC() next.]\n")
-  return(Objects)
+
+    if (FilterOption$filterSNPs) {
+        .champ_msg("\n  Filtering SNPs Start")
+        maskname <- .champ_mask_probes(at, population)
+        if (!length(maskname)) {
+            .champ_msg("    No SNP mask is available for this array; SNP filtering skipped.")
+        } else {
+            RemainProbe <- !rownames(Objects[[1L]]) %in% maskname
+            .champ_msg("    Removing ", sum(!RemainProbe), " probes.")
+            Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+            detP <- detP[RemainProbe, , drop = FALSE]
+            if (!is.null(beadcount)) beadcount <- beadcount[RemainProbe, , drop = FALSE]
+        }
+    }
+
+    if (FilterOption$filterMultiHit) {
+        .champ_msg("\n  Filtering MultiHit Start")
+        mh <- .champ_multi_hit()
+        if (is.null(mh)) {
+            .champ_msg("    The multi-hit probe list is not available; filtering skipped.")
+        } else {
+            RemainProbe <- !rownames(Objects[[1L]]) %in% mh
+            .champ_msg("    Removing ", sum(!RemainProbe), " probes.")
+            Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+            detP <- detP[RemainProbe, , drop = FALSE]
+            if (!is.null(beadcount)) beadcount <- beadcount[RemainProbe, , drop = FALSE]
+        }
+    }
+
+    if (FilterOption$filterXY) {
+        .champ_msg("\n  Filtering XY Start")
+        pf <- .champ_probe_features(at)
+        RemainProbe <- rownames(Objects[[1L]]) %in% rownames(pf)[!pf$CHR %in% c("X", "Y")]
+        .champ_msg("    Filtering probes on X/Y, removing ", sum(!RemainProbe), " probes.")
+        Objects <- lapply(Objects, function(x) x[RemainProbe, , drop = FALSE])
+        detP <- detP[RemainProbe, , drop = FALSE]
+        if (!is.null(beadcount)) beadcount <- beadcount[RemainProbe, , drop = FALSE]
+    }
+
+    if (!is.null(pd)) {
+        .champ_msg("\n  Updating PD file")
+        if (!FilterOption$filterDetP) {
+            RemainSample <- seq_len(nrow(pd))
+        }
+        pd <- pd[RemainSample, , drop = FALSE]
+        rownames(pd) <- NULL
+        Objects <- c(Objects, list(pd = pd))
+    }
+
+    if (isTRUE(fixOutlier) && "beta" %in% names(Objects)) {
+        .champ_msg("\n  Fixing Outliers Start")
+        v <- Objects$beta
+        pos <- v[v > 0]
+        if (any(v <= 0) && length(pos)) {
+            .champ_msg("    Replacing values <= 0 with the smallest positive value.")
+            v[v <= 0] <- min(pos)
+        }
+        below <- v[v < 1]
+        if (any(v >= 1) && length(below)) {
+            .champ_msg("    Replacing values >= 1 with the largest value below 1.")
+            v[v >= 1] <- max(below)
+        }
+        Objects$beta <- v
+    }
+    .champ_msg("[ Section 2: Filtering Done ]")
+
+    if (!length(Objects)) .champ_stop("  All probes were removed by filtering.")
+    .champ_msg("\n All filterings are Done, now you have ", nrow(Objects[[1L]]),
+               " probes and ", ncol(Objects[[1L]]), " samples.\n")
+    .champ_msg("[<<<<< ChAMP.FILTER END >>>>>>]")
+    .champ_msg("[===========================]")
+    .champ_msg("[You may want to process champ.QC() next.]\n")
+    attr(Objects, "arraytype") <- at
+    Objects
 }
-

@@ -1,414 +1,432 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("myLoad","myDMP","myNorm","probe","proportion","cgi","gene","Number","Variance","Value","ID","Sample","diamonds","logFC","negtive_log10P.adj","info","size","Beta_Value","Pheno","economics","unemploy","pop","MatchGeneName"))
+# =============================================================================
+#  DMP.GUI -- interactive explorer for champ.DMP() results
+#
+#  Builds a Shiny application that shows the differentially methylated
+#  positions of one comparison:
+#    * a filterable table of the significant DMPs,
+#    * a median-centred heatmap of their beta values (number of probes capped),
+#    * CpG-island / feature / feature-CpG composition barplots,
+#    * a gene view (probe profile with feature tracks + gene enrichment),
+#    * a volcano plot built from the real logFC and adj.P.Val columns, and
+#    * a single-CpG boxplot / scatter plot across the samples.
+#
+#  Only shiny, plotly, DT (tables) and shinythemes (theme) are needed; each is
+#  loaded through .champ_require() so a missing package produces an actionable
+#  error.  The .champ_gui_* helpers below are shared with DMR.GUI(),
+#  Block.GUI(), QC.GUI() and CpG.GUI().
+# =============================================================================
 
-DMP.GUI <- function(DMP=myDMP[[1]],
-                    beta=myNorm,
-                    pheno=myLoad$pd$Sample_Group,
-                    cutgroupnumber=4)
-{
-    data(MatchGeneName)
-    innerheatmap <- function(data)
-    {
-        if(nrow(data) < 5000) ncpg <- nrow(data) else ncpg <- 5000
-        o <- order(-matrixStats::rowVars(data))[1:ncpg]
-        data <- data[o,]
+utils::globalVariables(c("pos", "Value", "Class", "Group", "Proportion", "Number",
+                         "logFC", "neglog10P", "gene", "probe", "sample", "x", "y",
+                         "Beta", "Pheno", "label"))
 
-        a <- hclust(dist(data))$order
-        b <- hclust(dist(t(data)))$order
-        data <- data[a,b]
-        m = list(l = 200,r = 50,b = 50,t = 100,pad = 10)
-        SampleColfunc <- colorRampPalette(c("brown1","deepskyblue"))
-        p <- plot_ly(z = data,x = colnames(data), y = rownames(data),type = "heatmap")
-        p <- layout(p, title = paste("Heatmap for ",nrow(data)," 0.05 significant CpGs",sep=""),margin=m)
+# ---------------------------------------------------------------------------
+# helpers shared by all *_GUI files
+# ---------------------------------------------------------------------------
+
+.champ_gui_need <- function(dt = FALSE) {
+    .champ_require("shiny", "the ChAMP graphical interfaces")
+    .champ_require("plotly", "the ChAMP graphical interfaces")
+    if (isTRUE(dt)) .champ_require("DT", "the interactive tables of the ChAMP GUIs")
+    invisible(TRUE)
+}
+
+.champ_gui_theme <- function() {
+    if (.champ_has("shinythemes")) shinythemes::shinytheme("readable") else NULL
+}
+
+.champ_gui_palette <- function(n) {
+    n <- max(1L, as.integer(n)[1L])
+    grDevices::hcl.colors(n, if (n <= 8L) "Dark 3" else "Viridis")
+}
+
+.champ_gui_empty <- function(msg) {
+    plotly::layout(plotly::plot_ly(), title = list(text = msg, x = 0.5),
+                   xaxis = list(visible = FALSE), yaxis = list(visible = FALSE))
+}
+
+#' Grouping factor used by every GUI (numeric phenotypes are binned).
+.champ_gui_group <- function(pheno, n, ncut = 4L) {
+    pheno <- .champ_pheno(pheno, n)
+    if (length(unique(pheno[!is.na(pheno)])) < 2L) {
+        .champ_stop("'pheno' must contain at least two distinct values.")
     }
-    innercgibarplot <- function(h)
-    {
-        h <- apply(h,1,function(x) if(sum(x>0)!=0) prop.table(x) else x)
-        h <- data.frame(cgi=rep(colnames(h),each=nrow(h)),probe=rep(rownames(h),ncol(h)),proportion=as.vector(h))
-        p <- plot_ly(data=h,x = ~probe, y = ~proportion, type = "bar", color =~cgi)
-        m = list(l = 70,r = 30,b = 50,t = 50,pad = 10)
-        p <- layout(p, title = "cgi proportion barplot",margin=m)
+    if (.champ_is_numeric(pheno)) {
+        k <- max(2L, min(length(unique(pheno)), as.integer(ncut)[1L]))
+        return(base::cut(pheno, breaks = k, include.lowest = TRUE, dig.lab = 3L))
     }
-    innerfeaturebarplot <- function(h)
-    {
-        h <- apply(h,1,function(x) if(sum(x>0)!=0) prop.table(x) else x)
-        h <- data.frame(cgi=rep(colnames(h),each=nrow(h)),probe=rep(rownames(h),ncol(h)),proportion=as.vector(h))
-        p <- plot_ly(data=h,x = ~probe, y = ~proportion, type = "bar", color = ~cgi)
-        m = list(l = 70,r = 30,b = 50,t = 50,pad = 10)
-        p <- layout(p, title = "feature proportion barplot",margin=m)
+    factor(pheno, levels = sort(unique(pheno)))
+}
+
+#' Top-variance, median-centred matrix ready for plotly::plot_ly(type = "heatmap").
+.champ_gui_heat <- function(beta, max.probes = 500L) {
+    beta <- as.matrix(beta)
+    if (!nrow(beta) || !ncol(beta)) return(NULL)
+    v <- .champ_row_vars(beta)
+    v[!is.finite(v)] <- -Inf
+    n <- min(max(1L, as.integer(max.probes)[1L]), nrow(beta))
+    z <- beta[order(v, decreasing = TRUE)[seq_len(n)], , drop = FALSE]
+    z <- z - apply(z, 1L, stats::median, na.rm = TRUE)
+    z[!is.finite(z)] <- NA_real_
+    lim <- suppressWarnings(max(abs(z), na.rm = TRUE))
+    if (!is.finite(lim) || lim <= 0) lim <- 0.5
+    list(z = z, zlim = c(-lim, lim))
+}
+
+#' Horizontal colour tracks (feature / CpG island) drawn under a probe profile.
+.champ_gui_track <- function(values, palette, y) {
+    values <- as.character(values)
+    values[is.na(values)] <- "NA"
+    out <- list()
+    for (cls in names(palette)) {
+        idx <- which(values == cls)
+        if (!length(idx)) next
+        out[[length(out) + 1L]] <- list(
+            x = as.numeric(rbind(idx - 0.5, idx + 0.5, NA_real_)),
+            y = rep(c(y, y, NA_real_), length(idx)),
+            name = cls, colour = unname(palette[[cls]]))
     }
-    innerfeaturecgibarplot <- function(h)
-    {
-        h <- apply(h,1,function(x) if(sum(x>0)!=0) prop.table(x) else x)
-        h <- data.frame(cgi=rep(colnames(h),each=nrow(h)),probe=rep(rownames(h),ncol(h)),proportion=as.vector(h))
-        p <- plot_ly(data=h,x = ~probe, y = ~proportion, type = "bar", color = ~cgi)
-        m = list(l = 70,r = 30,b = 100,t = 50,pad = 10)
-        p <- layout(p, title = "feature-cgi proportion barplot",margin=m)
+    out
+}
+
+.champ_gui_add_track <- function(p, tracks) {
+    for (tr in tracks) {
+        p <- plotly::add_trace(p, x = tr$x, y = tr$y, type = "scatter", mode = "lines",
+                               name = tr$name, text = tr$name, hoverinfo = "text",
+                               line = list(color = tr$colour, width = 8), opacity = 0.6)
     }
-    innergeneenrich <- function(select)
-    {
-        rank <- sort(table(select[,"gene"]),decreasing=TRUE)
-        if(length(rank) > 70) rank <- rank[1:70]
-        select <- select[select$gene %in% names(rank),]
-        select$logFC <- select$logFC>0
-        h <- table(as.character(select$gene),select$logFC)
-        h <- h[order(rowSums(h),decreasing=T),]
-        colnames(h) <- c("Hypo","Hyper")
-        h <- data.frame(Variance=rep(colnames(h),each=nrow(h)),gene=rep(rownames(h),ncol(h)),Number=as.vector(h))
-        p <- plot_ly(data=h,x = ~gene, y = ~Number, type = "bar", color = ~Variance)
-        m = list(l = 70,r = 30,b = 150,t = 50,pad = 10)
-        p <- layout(p, title = paste("Top ",length(rank)," Gene Mostly Enriched by Significant CpGs",sep=""),margin=m,barmode = "stack")
+    p
+}
+
+.champ_gui_feature_cols <- c("1stExon" = "#00eeee", "3'UTR" = "#8b008b",
+                             "5'UTR" = "#00ee00", "Body" = "#ffd700", "IGR" = "#9e9e9e",
+                             "TSS1500" = "#ff3030", "TSS200" = "#00688b", "NA" = "#d9d9d9")
+
+.champ_gui_cgi_cols <- c("island" = "#ff83fa", "opensea" = "#ffdab9",
+                         "shelf" = "#bbffff", "shore" = "#98fb98", "NA" = "#d9d9d9")
+
+# ---------------------------------------------------------------------------
+# DMP specific helpers
+# ---------------------------------------------------------------------------
+
+#' Validate a DMP table and fill in any missing annotation column.
+.champ_gui_dmp_table <- function(DMP, arraytype, verbose = TRUE) {
+    if (is.list(DMP) && !is.data.frame(DMP)) {
+        if (!length(DMP)) .champ_stop("'DMP' is an empty list; run champ.DMP() first.")
+        if (isTRUE(verbose)) .champ_msg("  'DMP' is a list; using '", names(DMP)[1L], "'.")
+        DMP <- DMP[[1L]]
     }
-
-    innerGenePlot <- function(select,Group)
-    {
-        message("<< Generating dmrplot >>")
-        #select <- select[order(select$MAPINFO),]
-        G <- lapply(Group,function(x) t(x))
-        G <- lapply(G,function(h) data.frame(Sample=rep(colnames(h),each=nrow(h)),ID=rep(rownames(h),ncol(h)),pos=rep(as.numeric(as.factor(select$MAPINFO)),ncol(h)),Value=as.vector(h)))
-        for(i in 1:length(G)) G[[i]] <- data.frame(G[[i]],pheno=names(G)[i])
-        X <- do.call(rbind,G)
-        X <- cbind(X,showtext=paste("cpgID:",X$ID," Sample:",X$Sample,sep=""))
-
-        p <- plot_ly()
-        p <- add_trace(p,data=X, x=~pos, y=~Value,type="scatter", mode ="markers",text=~showtext,color=~pheno,marker=list(opacity = 0.6,size = 4))
-
-        message("<< Dots Plotted >>")
-
-        Fit <- lapply(G,function(h) data.frame(pos=unique(h$pos),ID=unique(h$ID),Mean=aggregate(h$Value,by=list(h$pos),mean)[,2]))
-        for(i in 1:length(Fit)) Fit[[i]] <- data.frame(Fit[[i]],pheno=paste(names(Fit)[i],"Mean"))
-        df <- data.frame(x = unlist(lapply(Fit, "[[", "pos")),
-                         y = unlist(lapply(Fit, "[[", "Mean")),
-                         ID = unlist(lapply(Fit, "[[", "ID")),
-                         cut = unlist(lapply(Fit, "[[", "pheno")))
-        p <- add_trace(p,data=df, x = ~x, y = ~y, text = ~ID, type="scatter", color = ~cut,mode = 'lines+markers',line = list(shape = "spline",width = 3,opacity = 0.3),marker=list(size = 1))
-
-        message("<< Mean line Plotted >>")
-
-        Fit2 <- lapply(G,function(h) data.frame(pos=unique(h$pos),ID=unique(h$ID),Fitted=unique(fitted(loess(h$Value ~ h$pos)))))
-        for(i in 1:length(Fit2)) Fit2[[i]] <- data.frame(Fit2[[i]],pheno=paste(names(Fit2)[i],"Loess"))
-        df2 <- data.frame(x = unlist(lapply(Fit2, "[[", "pos")),
-                         y = unlist(lapply(Fit2, "[[", "Fitted")),
-                         ID = unlist(lapply(Fit2, "[[", "ID")),
-                         cut = unlist(lapply(Fit2, "[[", "pheno")))
-        p <- add_trace(p,data=df2, x = ~x, y = ~y, text = ~ID, color = ~cut, type="scatter" ,mode = 'lines+markers',line =list(shape ="spline",width=3,opacity=0.3,dash = "dash"),marker=list(size = 1))
-
-        message("<< Loess line Plotted >>")
-
-        regioncol <- c("1stExon"="#00eeee","3'UTR"="#8b008b","5'UTR"="#00ee00","Body"="#ffd700","IGR"="#9e9e9e","TSS1500"="#ff3030","TSS200"="#00688b")
-        featureregion <- list()
-        for(i in names(regioncol))
-        {
-            index <- which(select$feature==i)
-            if(length(index)==0) next
-
-            oldw <- getOption("warn")
-            options(warn = -1)
-
-            featureregion[[i]]<- data.frame(x1 = index-0.5,
-                                            x2 = index+0.5,
-                                            y = -0.05,
-                                            IDfeature = i,
-                                            color = regioncol[i])
-
-            options(warn = oldw)
-        }
-        cgicol <- c("island"="#ff83fa","opensea"="#ffdab9","shelf"="#bbffff","shore"="#98fb98")
-        cgiregion <- list()
-        for(i in names(cgicol))
-        {
-            index <- which(select$cgi==i)
-            if(length(index)==0) next
-
-            oldw <- getOption("warn")
-            options(warn = -1)
-
-            cgiregion[[i]]<- data.frame(x1 = index-0.5,
-                                        x2 = index+0.5,
-                                        y = -0.1,
-                                        IDfeature = i,
-                                        color = cgicol[i])
-
-            options(warn = oldw)
-
-        }
-        #############################################
-        df <- rbind(do.call(rbind,featureregion),do.call(rbind,cgiregion))
-        colorrecord <- c()
-        for(i in 1:nrow(df))
-        {
-            legend = F
-            if(!df$color[i] %in% colorrecord)
-            {
-                colorrecord <- c(colorrecord,as.character(df$color[i]))
-                legend = T
-            }
-            p <- add_trace(p,
-                           x = c(df$x1[i], df$x2[i]),  # x0, x
-                           y = c(df$y[i],df$y[i]),  # y0, y1
-                           name = df$IDfeature[i],
-                           mode = "lines",
-                           line = list(color = df$color[i], width = 10 , opacity=0.5),
-                           showlegend = legend,
-                           hoverinfo = "text",
-                           # Create custom hover text
-                           text = df$IDfeature[i],
-                           type="scatter")
-        }
-        #############################################
-
-        message("<< Cgi Bar Plotted >>")
-
-
-        p <- layout(p, title = select$gene[1])
+    DMP <- as.data.frame(DMP, stringsAsFactors = FALSE)
+    if (!nrow(DMP)) .champ_stop("'DMP' has no rows; nothing to display.")
+    miss <- setdiff(c("logFC", "adj.P.Val"), colnames(DMP))
+    if (length(miss)) {
+        .champ_stop("'DMP' has no column(s): ", paste(miss, collapse = ", "), ".\n",
+                    "  Pass DMP[[1]] from champ.DMP(), which has logFC and adj.P.Val.")
     }
-
-    innervolcanoplot <- function(select)
-    {
-        h <- diamonds[sample(nrow(diamonds),nrow(select),replace=T),c("carat","price","carat","clarity")]
-        colnames(h) <- c("logFC","negtive_log10P.adj","size","info")
-        h[[1]] <- select$logFC
-        h[[2]] <- -(1)*log(select$adj.P.Val,10)
-        h[[3]] <- (abs(h[[1]])-min(abs(h[[1]])))/(max(abs(h[[1]])-min(abs(h[[1]]))))+(h[[2]]-min(h[[2]]))/(max(h[[2]]-min(h[[2]])))
-        h[[4]] <- paste(rownames(select),select$gene,select$feature,select$cgi)
-        if(nrow(h) > 1500) h2 <- h[sample(1:nrow(h),1500),]
-        h2 <- h2[order(h2$size),]
-        SampleColfunc <- colorRampPalette(c("brown1","deepskyblue"))
-        p <- plot_ly(h2, x=logFC, y=negtive_log10P.adj, text=info,mode = "markers",showlegend=FALSE,marker=list(opacity=0.5,size=3+(size*4),color=SampleColfunc(nrow(h2))))
-        m = list(l = 70,r = 70,b = 50,t = 50,pad = 10)
-        if(nrow(h) <= 1500)
-        {
-            p <- layout(p, title = paste("Volcano plot for",nrow(h2),"significant CpGs"),margin=m)
-        }else
-        {
-            p <- layout(p, title = paste("Volcano plot for 1500 out of total",nrow(h)," significant CpGs (Random)"),margin=m)
+    if (!.champ_is_numeric(DMP$logFC) || !.champ_is_numeric(DMP$adj.P.Val)) {
+        .champ_stop("'DMP$logFC' and 'DMP$adj.P.Val' must be numeric.")
+    }
+    add <- setdiff(c("CHR", "MAPINFO", "gene", "feature", "cgi"), colnames(DMP))
+    if (length(add)) {
+        ann <- .champ_probe_features_for(rownames(DMP), arraytype)
+        for (nm in add) DMP[[nm]] <- ann[[nm]]
+        if (isTRUE(verbose)) {
+            .champ_msg("  Added ", paste(add, collapse = ", "), " from the ChAMP annotation.")
         }
     }
+    DMP$CHR <- as.character(DMP$CHR)
+    DMP$feature <- as.character(DMP$feature)
+    DMP$cgi <- as.character(DMP$cgi)
+    DMP$gene <- as.character(DMP$gene)
+    DMP$feature[is.na(DMP$feature)] <- "NA"
+    DMP$cgi[is.na(DMP$cgi)] <- "NA"
+    DMP$gene[is.na(DMP$gene)] <- ""
+    if (is.null(DMP$feat.cgi)) DMP$feat.cgi <- paste(DMP$feature, DMP$cgi, sep = " - ")
+    DMP
+}
 
+#' Explore differentially methylated positions in a Shiny application
+#'
+#' Opens a Shiny/plotly interface with the DMP table, heatmap, feature/CpG
+#' composition, per-gene profile and per-CpG distribution of a comparison
+#' produced by \code{\link{champ.DMP}}.
+#'
+#' @param DMP data.frame (or list of data.frames) returned by champ.DMP().
+#' @param beta beta value matrix used for the DMP test (probes x samples).
+#' @param pheno phenotype vector, one entry per column of \code{beta}.  A
+#'   numeric phenotype is binned into \code{cutgroupnumber} groups.
+#' @param cutgroupnumber number of groups used when \code{pheno} is numeric.
+#' @param arraytype "450K", "EPICv1" or "EPICv2"; used for missing annotation.
+#' @param verbose print progress messages.
+#' @param runApp launch the application; when FALSE the shiny.appobj is
+#'   returned instead (useful for tests).
+#'
+#' @return invisibly, the shiny.appobj returned by \code{shiny::runApp}.
+#' @export
+DMP.GUI <- function(DMP = NULL, beta = NULL, pheno = NULL, cutgroupnumber = 4,
+                    arraytype = "450K", verbose = TRUE, runApp = TRUE) {
+    talk <- function(...) if (isTRUE(verbose)) .champ_msg(...)
+    talk("[=============================]")
+    talk("[<<<<<< DMP.GUI START >>>>>>>]")
+    .champ_gui_need(dt = TRUE)
+    at <- .champ_arraytype(arraytype)
+    beta <- .champ_as_beta(beta)
+    DMP <- .champ_gui_dmp_table(DMP, at, verbose)
+    pheno <- .champ_gui_group(pheno, ncol(beta), cutgroupnumber)
+    probes <- intersect(rownames(DMP), rownames(beta))
+    if (!length(probes)) {
+        .champ_stop("None of the probes in 'DMP' are present in 'beta'.\n",
+                    "  Make sure both objects come from the same data set.")
+    }
+    if (length(probes) < nrow(DMP)) {
+        talk("  ", nrow(DMP) - length(probes), " DMP probe(s) are absent from 'beta'.")
+    }
+    DMP <- DMP[rownames(DMP) %in% probes, , drop = FALSE]
+    DMP$logFC[is.na(DMP$logFC)] <- 0
+    DMP$adj.P.Val[is.na(DMP$adj.P.Val)] <- 1
+    n.gr <- nlevels(pheno)
+    genes <- sort(table(DMP$gene[nzchar(DMP$gene)]), decreasing = TRUE)
+    gene_default <- if (length(genes)) names(genes)[1L] else ""
+    talk("  ", nrow(DMP), " DMPs, ", ncol(beta), " samples, ", n.gr, " phenotype group(s).")
 
-    innercpgplot <- function(c,cpgname)
-    {
-        if(class(c$Pheno)=="numeric")
-        {
-            p <- plot_ly(c, x = ~Pheno, y = ~Beta_Value, text = ~Sample_Name, color = ~Beta_Value, mode = "markers",marker=list(opacity=0.5,size=5))
-            m = list(l = 70,r = 70,b = 50,t = 50,pad = 10)
-            p <- layout(p, title = paste("Scatter plot for",cpgname),margin=m)
+    prop_table <- function(all_values, sel_values, lfc, fc) {
+        all_values <- as.character(all_values)
+        sel_values <- as.character(sel_values)
+        all_values[is.na(all_values)] <- "NA"
+        sel_values[is.na(sel_values)] <- "NA"
+        lv <- sort(unique(c(all_values, sel_values)))
+        tab <- rbind(All = table(factor(all_values, levels = lv)),
+                     Hyper = table(factor(sel_values[lfc >= fc], levels = lv)),
+                     Hypo = table(factor(sel_values[lfc <= -fc], levels = lv)))
+        den <- rowSums(tab)
+        den[den == 0] <- 1
+        data.frame(Group = rep(rownames(tab), times = length(lv)),
+                   Class = rep(lv, each = nrow(tab)),
+                   Number = as.vector(tab),
+                   Proportion = as.vector(tab) / rep(den, times = length(lv)),
+                   stringsAsFactors = FALSE)
+    }
+
+    dmptable <- function(d) {
+        if (!nrow(d)) return(DT::datatable(data.frame(Message = "No DMP at these cutoffs.")))
+        cols <- intersect(c("CHR", "MAPINFO", "gene", "feature", "cgi", "logFC",
+                            "deltaBeta", grep("_AVG$", colnames(d), value = TRUE),
+                            "t", "P.Value", "adj.P.Val", "B"), colnames(d))
+        DT::datatable(data.frame(ID = rownames(d), d[, cols, drop = FALSE],
+                                 check.names = FALSE),
+                      rownames = FALSE, options = list(pageLength = 20))
+    }
+
+    heat_plot <- function(sel) {
+        if (!nrow(sel)) return(.champ_gui_empty("No significant DMP for these cutoffs."))
+        h <- .champ_gui_heat(beta[rownames(sel), , drop = FALSE], max.probes = 500L)
+        if (is.null(h)) return(.champ_gui_empty("No probe to display."))
+        p <- plotly::plot_ly(x = colnames(h$z), y = rownames(h$z), z = h$z,
+                             type = "heatmap", zmin = h$zlim[1], zmax = h$zlim[2],
+                             colors = grDevices::colorRampPalette(
+                                 c("deepskyblue", "black", "brown1"))(101),
+                             hovertemplate = "%{y}<br>%{x}<br>%{z:.2f}<extra></extra>")
+        plotly::layout(p, title = paste0("Median-centred beta of ", nrow(h$z), " probes"),
+                       margin = list(l = 130, r = 30, b = 80, t = 50))
+    }
+
+    bar_plot <- function(df, title) {
+        if (!nrow(df)) return(.champ_gui_empty(title))
+        p <- plotly::plot_ly(df, x = ~Group, y = ~Proportion, color = ~Class,
+                             type = "bar", text = ~Number,
+                             hovertemplate = "%{x} %{data.name}: %{text}<extra></extra>")
+        plotly::layout(p, title = title, barmode = "stack",
+                       xaxis = list(title = ""), yaxis = list(title = "proportion"),
+                       margin = list(l = 60, r = 20, b = 100, t = 50))
+    }
+
+    gene_enrich <- function(sel) {
+        sel <- sel[nzchar(sel$gene), , drop = FALSE]
+        if (!nrow(sel)) return(.champ_gui_empty("No gene annotation for these DMPs."))
+        dir <- factor(ifelse(sel$logFC > 0, "Hyper", "Hypo"), levels = c("Hyper", "Hypo"))
+        tab <- table(sel$gene, dir)
+        keep <- utils::head(names(sort(rowSums(tab), decreasing = TRUE)), 70L)
+        tab <- tab[keep, , drop = FALSE]
+        df <- data.frame(gene = rep(rownames(tab), times = ncol(tab)),
+                         dir = rep(colnames(tab), each = nrow(tab)),
+                         Number = as.vector(tab), stringsAsFactors = FALSE)
+        p <- plotly::plot_ly(df, x = ~gene, y = ~Number, color = ~dir, type = "bar")
+        plotly::layout(p, barmode = "stack", title = paste("Top", length(keep),
+                                                           "genes enriched by DMPs"),
+                       xaxis = list(title = ""), yaxis = list(title = "number of CpGs"),
+                       margin = list(b = 140, t = 50))
+    }
+
+    volcano_plot <- function(sel) {
+        if (!nrow(sel)) return(.champ_gui_empty("No significant DMP for these cutoffs."))
+        d <- data.frame(logFC = sel$logFC,
+                        neglog10P = -log10(pmax(sel$adj.P.Val, 1e-50)),
+                        probe = rownames(sel), gene = sel$gene, stringsAsFactors = FALSE)
+        n <- min(1500L, nrow(d))
+        d <- d[order(d$neglog10P, decreasing = TRUE)[seq_len(n)], , drop = FALSE]
+        p <- plotly::plot_ly(d, x = ~logFC, y = ~neglog10P, type = "scatter",
+                             mode = "markers", text = ~paste0(probe, " (", gene, ")"),
+                             marker = list(size = 5, opacity = 0.6, color = ~neglog10P,
+                                           colorscale = "RdBu", reversescale = TRUE,
+                                           showscale = FALSE))
+        plotly::layout(p, title = paste0("Volcano plot for ", n, " significant CpGs"),
+                       xaxis = list(title = "logFC"),
+                       yaxis = list(title = "-log10 adjusted p"))
+    }
+
+    gene_plot <- function(sel) {
+        if (!nrow(sel)) return(.champ_gui_empty("No significant CpG for this gene."))
+        sel <- sel[order(sel$MAPINFO), , drop = FALSE]
+        mat <- beta[rownames(sel), , drop = FALSE]
+        xs <- seq_len(nrow(mat))
+        pal <- .champ_gui_palette(n.gr)
+        p <- plotly::plot_ly()
+        for (i in seq_len(n.gr)) {
+            g <- levels(pheno)[i]
+            cols <- which(pheno == g)
+            if (!length(cols)) next
+            sub <- data.frame(
+                x = rep(xs, times = length(cols)),
+                Beta = as.vector(mat[, cols, drop = FALSE]),
+                label = paste0(rep(rownames(mat), times = length(cols)), " | ",
+                               rep(colnames(mat)[cols], each = nrow(mat))),
+                stringsAsFactors = FALSE)
+            p <- plotly::add_trace(p, data = sub, x = ~x, y = ~Beta, type = "scatter",
+                                   mode = "markers", name = g, text = ~label,
+                                   marker = list(size = 4, color = pal[i], opacity = 0.55))
+            p <- plotly::add_trace(p, x = xs,
+                                   y = rowMeans(mat[, cols, drop = FALSE], na.rm = TRUE),
+                                   type = "scatter", mode = "lines", name = paste(g, "mean"),
+                                   line = list(color = pal[i], width = 3))
+        }
+        rng <- suppressWarnings(range(mat, na.rm = TRUE))
+        if (!all(is.finite(rng))) rng <- c(0, 1)
+        step <- max(0.02, diff(rng) * 0.08)
+        p <- .champ_gui_add_track(p, c(
+            .champ_gui_track(sel$feature, .champ_gui_feature_cols, rng[1] - 2 * step),
+            .champ_gui_track(sel$cgi, .champ_gui_cgi_cols, rng[1] - 3.5 * step)))
+        plotly::layout(p, title = paste0(sel$gene[1L], " (", nrow(sel), " CpG)"),
+                       xaxis = list(title = "CpG in genomic order"),
+                       yaxis = list(title = "beta", range = c(rng[1] - 4.5 * step, rng[2])),
+                       margin = list(b = 60, t = 50))
+    }
+
+    cpg_plot <- function(cpgid) {
+        cpgid <- trimws(as.character(cpgid)[1L])
+        if (is.na(cpgid) || !nzchar(cpgid)) return(.champ_gui_empty("Enter a CpG ID."))
+        if (!cpgid %in% rownames(beta)) {
+            return(.champ_gui_empty(paste0("CpG '", cpgid, "' is not in 'beta'.")))
+        }
+        d <- data.frame(Beta = as.numeric(beta[cpgid, ]), Pheno = pheno,
+                        Sample = colnames(beta), stringsAsFactors = FALSE)
+        if (.champ_is_numeric(pheno)) {
+            p <- plotly::plot_ly(d, x = ~Pheno, y = ~Beta, type = "scatter", mode = "markers",
+                                 text = ~Sample, marker = list(size = 6, opacity = 0.6))
+            p <- plotly::layout(p, xaxis = list(title = "phenotype"),
+                                yaxis = list(title = "beta"))
         } else {
-            p <- plot_ly(c, y = ~Beta_Value, color = ~Pheno, type = "box", boxpoints = "all", jitter = 0.3,pointpos = 0)
-            m = list(l = 70,r = 70,b = 50,t = 50,pad = 10)
-            p <- layout(p, title = paste("Boxplot for",cpgname),margin=m)
+            p <- plotly::plot_ly(d, x = ~Pheno, y = ~Beta, type = "box",
+                                 boxpoints = "all", jitter = 0.3, pointpos = 0,
+                                 color = ~Pheno)
+            p <- plotly::layout(p, xaxis = list(title = ""), yaxis = list(title = "beta"),
+                                showlegend = FALSE)
         }
-    }
-    innertest <- function()
-    {
-        m <- loess(unemploy / pop ~ as.numeric(date), data = economics)
-        p <- economics %>%
-        plot_ly(x = date, y = unemploy / pop) %>%
-        add_trace(y = fitted(m)) %>%
-        layout(showlegend = F)
+        plotly::layout(p, title = cpgid)
     }
 
-    app <- shinyApp(
-        ui = fluidPage(
-                tags$head(tags$style("#test{height:40vh !important;}")),
-                tags$head(tags$style("#heatmap{height:80vh !important;}")),
-                tags$head(tags$style("#cgibarplot{height:40vh !important;}")),
-                tags$head(tags$style("#featurebarplot{height:40vh !important;}")),
-                tags$head(tags$style("#featurecgibarplot{height:40vh !important;}")),
-                tags$head(tags$style("#geneenrich{height:40vh !important;}")),
-                tags$head(tags$style("#geneplot{height:40vh !important;}")),
-                tags$head(tags$style("#volcanoplot{height:40vh !important;}")),
-                tags$head(tags$style("#cpgplot{height:40vh !important;}")),
-                tags$head(tags$style("#inc{height:40vh !important;}")),
-
-                theme = shinytheme("readable"),
-                titlePanel("DMP Overview"),
-                
-		        sidebarLayout(
-                    sidebarPanel(
-                        br(),
-                        width=3,
-                        sliderInput("pvaluebin","P value Cutoff:",min = 0,max = 1,step = 0.025,value = 0.05),
-                        sliderInput("logFCbin","abs(logFC) Cutoff:",min = 0,max = 1,step = 0.025,value = 0),
-                        actionButton("go", "Submit"),
-
-                        br(),
-                        br(),
-                        br(),
-                        textInput("genebin", "Gene Symbol:", value = "NFIX"),
-                        actionButton("genesearch", "Submit"),
-
-                        br(),
-                        br(),
-                        br(),
-                        textInput("cpgbin", "CpG ID:", value = "cg06822689"),
-                        actionButton("cpgsearch", "Submit")
-                                ),
-                        mainPanel( 
-                             tabsetPanel(
-                                 tabPanel("DMPtable",
-                                          align = "left",
-                                          div(DT::dataTableOutput("table"), style = "font-size:75%")
-                                         ),
-                                 tabPanel("Heatmap",
-                                          align = "center",
-                                          plotlyOutput("heatmap")
-                                         ),
-                                 tabPanel("Feature&Cgi",
-                                          align = "center",
-                                          br(),
-                                          fluidRow(
-                                              column(width = 6,
-                                                  plotlyOutput("cgibarplot")
-                                                     ),
-                                              column(width = 6,
-                                                  plotlyOutput("featurebarplot")
-                                                     ),#column
-                                              column(width = 12,
-                                                  plotlyOutput("featurecgibarplot")
-                                                     )#column
-                                                  )#fluidRow
-                                         ),
-                                 tabPanel("Gene",
-                                          align = "center",
-                                          fluidRow(
-                                              align = "center",
-                                              br(),
-                                              column(width = 12,
-                                                  plotlyOutput("geneplot")
-                                                     ),
-                                              column(width = 12,
-                                                  align = "center",
-                                                  br(),
-                                                  htmlOutput("inc")
-                                                     )#column
-                                                  )#fluidRow
-                                         ),#tabPanel
-                                 tabPanel("CpG",
-                                          br(),
-                                          align = "center",
-                                          fluidRow(
-                                           #   column(width = 6,
-                                           #       plotlyOutput("volcanoplot")
-                                           #          ),
-                                              column(width = 12,
-                                                  plotlyOutput("geneenrich")
-                                                     ),
-                                              column(width = 6,
-                                                  plotlyOutput("cpgplot")
-                                                     )
-                                                  )#fluidRow
-                                         )#tabPanel
-                                    )#tabsetPanel
-                                 )
-                             )
-                    ),#ui
-    server = function(input, output){
-
-        CpG_repalce <- eventReactive(input$cpgsearch,
-                    {
-                        pvalueCutoff <- as.numeric(input$pvaluebin)
-                        abslogFCCutoff <- as.numeric(input$logFCbin)
-                        cpgid <- input$cpgbin
-
-                        ### Generate Data for CpGplot
-                        mycpg <- data.frame(Beta_Value=beta[cpgid,],Pheno=pheno,Sample_Name=colnames(beta))
-                        Parameter <- list(mycpg=mycpg,cpgid=cpgid)
-                    })
-        Gene_repalce <- eventReactive(input$genesearch,
-                    {
-                        pvalueCutoff <- as.numeric(input$pvaluebin)
-                        abslogFCCutoff <- as.numeric(input$logFCbin)
-                        genename <- input$genebin
-
-                        ### Generate Data for Geneplot
-                        mygeneselect=DMP[which(DMP$gene==genename & DMP$adj.P.Val <= pvalueCutoff & abs(DMP$logFC) >= abslogFCCutoff),]
-                        mygeneselect <- mygeneselect[order(mygeneselect$MAPINFO),]
-                        if(class(pheno)=="numeric")
-                        {
-                            cut_group <- as.character(cut(pheno,4))
-                            mygroup <- split(as.data.frame(t(beta[rownames(mygeneselect),])),cut_group)
-                        } else {
-                            mygroup <- split(as.data.frame(t(beta[rownames(mygeneselect),])),pheno)
-                        }
-                        Parameter <- list(mygeneselect=mygeneselect,mygroup=mygroup,genename=genename)
-                    })
-        Cutoff_repalce <- eventReactive(input$go,
-                    {
-                        gc()
-                        pvalueCutoff <- as.numeric(input$pvaluebin)
-                        abslogFCCutoff <- as.numeric(input$logFCbin)
-
-                        mydmp <- DMP[which(DMP$adj.P.Val <= pvalueCutoff & abs(DMP$logFC) >= abslogFCCutoff),]
-                        message(dim(mydmp))
-                        ### Generate Data for Heatmap
-                        myheatmapdata=beta[rownames(mydmp),] 
-
-                        ### Generate Data for cgi Barplot
-                        h.cgi <- rbind(AllProbe=table(as.factor(DMP$cgi)),
-                                   HyperProbe=table(as.factor(mydmp$cgi)[mydmp$logFC >= abslogFCCutoff]),
-                                   HypoProbe=table(as.factor(mydmp$cgi)[mydmp$logFC <= (-1)*abslogFCCutoff]))
-
-                        ### Generate Data for feature Barplot
-                        h.feature <- rbind(AllProbe=table(as.factor(DMP$feature)),
-                                   HyperProbe=table(as.factor(mydmp$feature)[mydmp$logFC >= abslogFCCutoff]),
-                                   HypoProbe=table(as.factor(mydmp$feature)[mydmp$logFC <= (-1)*abslogFCCutoff]))
-
-                        ### Generate Data for feature.cgi Barplot
-                        h.feature.cgi <- rbind(AllProbe=table(as.factor(DMP$feat.cgi)),
-                                               HyperProbe=table(as.factor(mydmp$feat.cgi)[mydmp$logFC >= abslogFCCutoff]),
-                                               HypoProbe=table(as.factor(mydmp$feat.cgi)[mydmp$logFC <= (-1)*abslogFCCutoff]))
-
-                        ### Generate Data for geneenrich Barplot
-                        myallgeneselect=mydmp[mydmp$gene!="",c("gene","adj.P.Val","logFC")]
-
-
-
-                        Parameter <- list(pvalueCutoff=pvalueCutoff,
-                                       abslogFCCutoff=abslogFCCutoff,
-                                       mydmp=mydmp,
-                                       myheatmapdata=myheatmapdata,
-                                       h.cgi=h.cgi,
-                                       h.feature=h.feature,
-                                       h.feature.cgi=h.feature.cgi,
-                                       myallgeneselect=myallgeneselect)
-                    })
-
-        output$table <- DT::renderDataTable({
-                                         if(class(pheno)=="numeric") {
-                                            datatable <- Cutoff_repalce()$mydmp[,c("CHR","MAPINFO","gene","feature","cgi",names(DMP)[1:6])]
-                                         } else {
-                                            datatable <- Cutoff_repalce()$mydmp[,c("CHR","MAPINFO","gene","feature","cgi",names(DMP)[1:9])]
-                                         }
-                                            datatable <- data.frame(ID=rownames(datatable),datatable)
-                                        },options = list(pageLength=20))
-        output$heatmap <- renderPlotly({   
-                                           innerheatmap(Cutoff_repalce()$myheatmapdata)
-                                       })
-        output$cgibarplot <- renderPlotly({   
-                                           innercgibarplot(Cutoff_repalce()$h.cgi)
-                                       })
-        output$featurebarplot <- renderPlotly({   
-                                           innerfeaturebarplot(Cutoff_repalce()$h.feature)
-                                       })
-        output$featurecgibarplot <- renderPlotly({   
-                                           innerfeaturecgibarplot(Cutoff_repalce()$h.feature.cgi)
-                                       })
-        output$geneenrich <- renderPlotly({   
-                                           innergeneenrich(Cutoff_repalce()$myallgeneselect)
-                                       })
-        output$geneplot <- renderPlotly({   
-                                           innerGenePlot(Gene_repalce()$mygeneselect,Gene_repalce()$mygroup)
-                                       })
-#        output$volcanoplot <- renderPlotly({   
-#                                           innervolcanoplot(Cutoff_repalce()$mydmp)
-#                                       })
-        output$cpgplot <- renderPlotly({   
-                                           innercpgplot(CpG_repalce()$mycpg,CpG_repalce()$cpgid)
-                                       })
-        output$inc <- renderUI({
-                 webpage <- tags$iframe(src=paste("https://www.wikigenes.org/e/gene/e/",MatchGeneName[which(MatchGeneName[,1]==Gene_repalce()$genename),2],".html",sep=""),width="60%",height="100%")
-                   })
-        }
+    ui <- shiny::fluidPage(
+        theme = .champ_gui_theme(),
+        shiny::tags$head(shiny::tags$style(
+            "#table, #genetable {font-size:75%;}",
+            "#heatmap {height:70vh !important;}",
+            "#geneplot {height:60vh !important;}",
+            "#volcanoplot, #cpgplot, #cgibarplot, #featurebarplot,",
+            "#featurecgibarplot, #geneenrich {height:45vh !important;}")),
+        shiny::titlePanel("DMP Overview"),
+        shiny::sidebarLayout(
+            shiny::sidebarPanel(
+                width = 3,
+                shiny::sliderInput("pvaluebin", "P value cutoff:", min = 0, max = 1,
+                                   step = 0.025, value = 0.05),
+                shiny::sliderInput("logFCbin", "abs(logFC) cutoff:", min = 0, max = 1,
+                                   step = 0.025, value = 0),
+                shiny::actionButton("go", "Submit"),
+                shiny::hr(),
+                shiny::textInput("genebin", "Gene symbol:", value = gene_default),
+                shiny::actionButton("genesearch", "Submit"),
+                shiny::hr(),
+                shiny::textInput("cpgbin", "CpG ID:", value = rownames(DMP)[1L]),
+                shiny::actionButton("cpgsearch", "Submit")),
+            shiny::mainPanel(
+                shiny::tabsetPanel(
+                    shiny::tabPanel("DMP table",
+                                    shiny::div(DT::dataTableOutput("table"),
+                                               style = "font-size:75%")),
+                    shiny::tabPanel("Heatmap", plotly::plotlyOutput("heatmap")),
+                    shiny::tabPanel("Feature & CpG",
+                                    shiny::fluidRow(
+                                        shiny::column(6, plotly::plotlyOutput("cgibarplot")),
+                                        shiny::column(6, plotly::plotlyOutput("featurebarplot")),
+                                        shiny::column(12, plotly::plotlyOutput("featurecgibarplot")))),
+                    shiny::tabPanel("Gene",
+                                    plotly::plotlyOutput("geneplot"),
+                                    shiny::div(DT::dataTableOutput("genetable"),
+                                               style = "font-size:75%")),
+                    shiny::tabPanel("Volcano",
+                                    plotly::plotlyOutput("volcanoplot")),
+                    shiny::tabPanel("CpG",
+                                    plotly::plotlyOutput("geneenrich"),
+                                    plotly::plotlyOutput("cpgplot"))
+                )
+            )
+        )
     )
-    runApp(app)
+
+    server <- function(input, output, session) {
+        cut_data <- shiny::eventReactive(input$go, {
+            p <- as.numeric(input$pvaluebin)
+            fc <- as.numeric(input$logFCbin)
+            if (!is.finite(p)) p <- 1
+            if (!is.finite(fc)) fc <- 0
+            sel <- DMP[DMP$adj.P.Val <= p & abs(DMP$logFC) >= fc, , drop = FALSE]
+            talk("  DMP.GUI: ", nrow(sel), " of ", nrow(DMP), " DMPs pass the cutoffs.")
+            list(sel = sel,
+                 cgi = prop_table(DMP$cgi, sel$cgi, sel$logFC, fc),
+                 feature = prop_table(DMP$feature, sel$feature, sel$logFC, fc),
+                 featcgi = prop_table(DMP$feat.cgi, sel$feat.cgi, sel$logFC, fc))
+        }, ignoreNULL = FALSE)
+
+        gene_data <- shiny::eventReactive(input$genesearch, {
+            g <- trimws(input$genebin)
+            p <- as.numeric(input$pvaluebin)
+            fc <- as.numeric(input$logFCbin)
+            if (!is.finite(p)) p <- 1
+            if (!is.finite(fc)) fc <- 0
+            if (!nzchar(g)) return(list(sel = DMP[0, , drop = FALSE], gene = g))
+            sel <- DMP[grepl(g, DMP$gene, fixed = TRUE) & DMP$adj.P.Val <= p &
+                       abs(DMP$logFC) >= fc, , drop = FALSE]
+            list(sel = sel, gene = g)
+        }, ignoreNULL = FALSE)
+
+        cpg_data <- shiny::eventReactive(input$cpgsearch, {
+            trimws(input$cpgbin)
+        }, ignoreNULL = FALSE)
+
+        output$table <- DT::renderDataTable(dmptable(cut_data()$sel))
+        output$genetable <- DT::renderDataTable(dmptable(gene_data()$sel))
+        output$heatmap <- plotly::renderPlotly(heat_plot(cut_data()$sel))
+        output$cgibarplot <- plotly::renderPlotly(bar_plot(cut_data()$cgi, "CpG island"))
+        output$featurebarplot <- plotly::renderPlotly(bar_plot(cut_data()$feature, "Feature"))
+        output$featurecgibarplot <- plotly::renderPlotly(
+            bar_plot(cut_data()$featcgi, "Feature - CpG island"))
+        output$geneenrich <- plotly::renderPlotly(gene_enrich(cut_data()$sel))
+        output$volcanoplot <- plotly::renderPlotly(volcano_plot(cut_data()$sel))
+        output$geneplot <- plotly::renderPlotly(gene_plot(gene_data()$sel))
+        output$cpgplot <- plotly::renderPlotly(cpg_plot(cpg_data()))
+    }
+
+    app <- shiny::shinyApp(ui = ui, server = server)
+    talk("[<<<<<< DMP.GUI END >>>>>>>>>]")
+    if (!isTRUE(runApp)) return(app)
+    invisible(shiny::runApp(app))
 }

@@ -1,258 +1,163 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("myBlock","myLoad","myNorm","probe.features.epic","probe.features","Value","ID","Sample","aggregate","x","y","fitted","loess"))
+# =============================================================================
+#  Block.GUI -- interactive explorer for champ.Block() results
+#
+#  Shows the block table and, for the selected block, the average beta profile
+#  of the probes it contains together with the block statistics reported by
+#  bumphunter.
+# =============================================================================
 
-Block.GUI <- function(Block=myBlock,
-                      beta=myNorm,
-                      pheno=myLoad$pd$Sample_Group,
-                      runDMP=TRUE,
-                      compare.group=NULL,
-                      arraytype="450K")
-{
-  # if(arraytype == "EPIC") data(probe.features.epic) else data(probe.features)
-  if(arraytype %in% c("EPIC", "EPICv2")) {
-    data("probe.features.epicv2")
-  } else if(arraytype == "EPICv1") {
-    data("probe.features.epicv1")
-  } else if(arraytype == "450K") { 
-    data("probe.features")
-  } else (
-    stop("arraytype must be `EPICv2`, `EPICv1`, `450K`")
-  )
-  
-  probe.features <- probe.features[names(Block$allCLID.v),]
-  
-  design <- model.matrix( ~ 0 + pheno)
-  fit <- lmFit(Block$avbetaCL.m, design)
-  fit2 <- eBayes(fit)
-  clusterDMP <- topTable(fit2,coef=1,number=nrow(Block$avbetaCL.m),adjust.method="BH")
-  
-  B2 <- makeGRangesFromDataFrame(Block$Block[,1:4])
-  A2 <- makeGRangesFromDataFrame(data.frame(seqnames=Block$posCL.m[,2],start=Block$posCL.m[,1],end=Block$posCL.m[,1]))
-  C <- as.data.frame(findOverlaps(B2,A2))
-  clustertmp <- data.frame(Blockindex=paste("Block",C$queryHits,sep="_"),Block$posCL.m[C$subjectHits,2:1])
-  clustertmp <- data.frame(clustertmp,clusterDMP[rownames(clustertmp),])
-  
-  message("Generation CpG information")
-  cpgtmp <- probe.features[names(Block$allCLID.v[which(Block$allCLID.v %in% rownames(clustertmp))]),c(1,2,5,6,7)]
-  
-  if(runDMP)
-  {
-    tmpbeta <- beta
-    tmppheno <- pheno
-    if(class(pheno)=="numeric") {
-      message("  Your pheno parameter is numeric, champ.DMP() function would calculate linear regression for your CpGs.")
-    } else {
-      message("  You pheno is ",class(pheno)," type.")
-      message("    Your pheno information contains following groups. >>")
-      sapply(unique(pheno),function(x) message("    <",x,">:",sum(pheno==x)," samples."))
-      
-      if(length(unique(pheno))==2) {
-        message("  Your pheno contains EXACTLY two phenotypes, which is good, compare.group is not needed.")
-      } else {
-        message("  Your pheno contains more than 2 phenotypes, please use compare.group to specify only two of them here.")
-        if(is.null(compare.group)){
-          stop("  compare.group is needed here, please specify compare.group.")
-        } else if (sum(compare.group %in% unique(pheno))==2) {
-          message("  Your compare.group is in accord with your pheno, which is good, now we are about to extract information for your compare.group.")
-          tmpbeta <- beta[,which(pheno %in% compare.group)]
-          tmppheno <- pheno[which(pheno %in% compare.group)]
+utils::globalVariables(c("Position", "Beta", "Group", "stat", "value"))
+
+#' Explore differentially methylated blocks in a Shiny application
+#'
+#' @param Block data.frame (or the list returned by champ.Block()).
+#' @param beta beta value matrix used for the block analysis.
+#' @param pheno phenotype vector, one entry per column of \code{beta}.
+#' @param arraytype "450K", "EPICv1" or "EPICv2".
+#' @param verbose print progress messages.
+#' @param runApp launch the application; FALSE returns the shiny.appobj.
+#'
+#' @return invisibly, the shiny.appobj returned by \code{shiny::runApp}.
+#' @export
+Block.GUI <- function(Block = NULL, beta = NULL, pheno = NULL, arraytype = "450K",
+                      verbose = TRUE, runApp = TRUE) {
+    talk <- function(...) if (isTRUE(verbose)) .champ_msg(...)
+    talk("[=============================]")
+    talk("[<<<<<< Block.GUI START >>>>>]")
+    .champ_gui_need(dt = TRUE)
+    at <- .champ_arraytype(arraytype)
+    beta <- .champ_as_beta(beta)
+
+    if (is.list(Block) && !is.data.frame(Block)) {
+        if (!is.null(Block$Block)) {
+            Block <- Block$Block
+        } else if (!length(Block)) {
+            .champ_stop("'Block' is an empty list; run champ.Block() first.")
         } else {
-          stop("  Seems your compare.group is not in accord with your pheno, please recheck your pheno and your compare.group.")
+            Block <- Block[[1L]]
         }
-      }
     }
-    message("Calculating DMP")
-    DMP <- champ.DMP(beta=tmpbeta,
-                     pheno=tmppheno,
-                     adjPVal=1,
-                     adjust.method="BH",
-                     compare.group=compare.group,
-                     arraytype=arraytype)
-    cpgDMP <- DMP[[1]]
-    cpgtmp <- data.frame(cpgtmp,cpgDMP[rownames(cpgtmp),c(1,3,4,5)])
-  }
-  
-  
-  cpgtmp <- data.frame(Clusterindex=Block$allCLID.v[rownames(cpgtmp)],cpgtmp)
-  cpgtmp <- data.frame(Blockindex=clustertmp[as.character(cpgtmp$Clusterindex),"Blockindex"],cpgtmp)
-  cpgtmp <- cpgtmp[order(cpgtmp$Blockindex,cpgtmp$MAPINFO),]
-  
-  innerblockplot <- function(G,cpgidf,block.idx)
-  {
-    message("<< Generating dmrplot >>")
-    
-    for(i in 1:length(G)) G[[i]] <- data.frame(G[[i]],pheno=names(G)[i])
-    X <- do.call(rbind,G)
-    X <- cbind(X,showtext=paste("cpgID:",X$ID," Sample:",X$Sample,sep=""))
-    p <- plot_ly()
-    p <- add_trace(p,data=X, x=~pos, y=~Value,type="scatter", mode = "markers", text =~showtext,color=~pheno,marker=list(opacity = 0.6,size = 4))
-    
-    message("<< Dots Plotted >>")
-    
-    Fit <- lapply(G,function(h) data.frame(pos=unique(h$pos),ID=unique(h$ID),Mean=aggregate(h$Value,by=list(h$pos),mean)[,2]))
-    for(i in 1:length(Fit)) Fit[[i]] <- data.frame(Fit[[i]],pheno=paste(names(Fit)[i],"Mean"))
-    df <- data.frame(x = unlist(lapply(Fit, "[[", "pos")),
-                     y = unlist(lapply(Fit, "[[", "Mean")),
-                     ID = unlist(lapply(Fit, "[[", "ID")),
-                     cut = unlist(lapply(Fit, "[[", "pheno")))
-    
-    p <- add_trace(p,data=df, x =~x, y =~y, text =~ID, color =~cut,type="scatter", mode="lines+markers",line = list(shape = "linear",width = 3,opacity = 0.3),marker=list(size = 1))
-    
-    message("<< Mean line Plotted >>")
-    
-    Fit2 <- lapply(G,function(h) data.frame(pos=unique(h$pos),ID=unique(h$ID),Fitted=unique(fitted(loess(h$Value ~ h$pos)))))
-    for(i in 1:length(Fit2)) Fit2[[i]] <- data.frame(Fit2[[i]],pheno=paste(names(Fit2)[i],"Loess"))
-    df2 <- data.frame(x = unlist(lapply(Fit2, "[[", "pos")),
-                      y = unlist(lapply(Fit2, "[[", "Fitted")),
-                      ID = unlist(lapply(Fit2, "[[", "ID")),
-                      cut = unlist(lapply(Fit2, "[[", "pheno")))
-    p <- add_trace(p,data=df2, x =~x, y =~y, text =~ID, color =~cut, type="scatter",line =list(shape ="spline",width=3,opacity=0.3,dash = "dash"),marker=list(size = 1))
-    
-    message("<< Loess line Plotted >>")
-    
-    if(!is.null(cpgidf))
-      p <- add_trace(p,data=cpgidf,x=~pos,y=~y,text=~ID,type="scatter",mode="markers",name="CpG Islands",marker=list(opacity = 0.6,size = 10,color="#8b3a62"))
-    p <- layout(p, title = paste("Block",block.idx,sep="_"))
-  }
-  innertestplot <- function()
-  {
-    plot_ly(x=1:10,y=1:10)
-  }
-  
-  app <- shinyApp(
-    ui = fluidPage(
-      tags$head(tags$style("#blockplot{height:40vh !important;}")),
-      
-      theme = shinytheme("readable"),
-      titlePanel("Block Overview"),
-      
-      sidebarLayout(
-        sidebarPanel(
-          br(),
-          width=3,
-          sliderInput("pvaluebin","P value Cutoff:",min = 0,max = 1,step = 0.025,value = 0.05),
-          sliderInput("mincluserbin","Min Number Clusters:",min = 1,max = 350,step = 1,value = 100),
-          actionButton("go", "Submit"),
-          
-          br(),
-          br(),
-          br(),
-          sliderInput("blockbin","Block Index:",min = 1,max = nrow(Block$Block),step = 1,value = 1),
-          actionButton("blocksearch", "Submit")
-        ),#sidebarPanel
-        
-        mainPanel( 
-          tabsetPanel(
-            tabPanel("Blocktable",
-                     align = "left",
-                     div(DT::dataTableOutput("blocktable"), style = "font-size:75%")
-            ),
-            tabPanel("CpGtable",
-                     align = "left",
-                     div(DT::dataTableOutput("cpgtable"), style = "font-size:75%")
-            ),
-            tabPanel("Blockplot",
-                     align = "center",
-                     br(),
-                     fluidRow(
-                       align = "center",
-                       br(),
-                       column(width = 12,
-                              align = "left",
-                              div(DT::dataTableOutput("clustertable"), style = "font-size:75%")
-                       ),#column
-                       column(width = 12,
-                              align = "center",
-                              plotlyOutput("blockplot")
-                       )#column
-                     )#fluidRow
+    Block <- as.data.frame(Block, stringsAsFactors = FALSE)
+    if (!nrow(Block)) .champ_stop("'Block' has no rows; nothing to display.")
+    if (!"chr" %in% colnames(Block)) {
+        alt <- intersect(c("seqnames", "CHR"), colnames(Block))
+        if (!length(alt)) .champ_stop("'Block' has no chromosome column.")
+        colnames(Block)[colnames(Block) == alt[1L]] <- "chr"
+    }
+    if (!all(c("start", "end") %in% colnames(Block))) {
+        .champ_stop("'Block' must contain 'start' and 'end' columns.")
+    }
+    Block$chr <- as.character(Block$chr)
+    Block$start <- as.numeric(Block$start)
+    Block$end <- as.numeric(Block$end)
+    Block$label <- paste0(Block$chr, ":", Block$start, "-", Block$end)
+
+    pheno <- .champ_gui_group(pheno, ncol(beta), 4)
+    pf <- .champ_probe_features(at)
+    n.gr <- nlevels(pheno)
+    talk("  ", nrow(Block), " blocks, ", ncol(beta), " samples.")
+
+    region_probes <- function(i) {
+        if (length(i) != 1L || is.na(i)) return(character(0))
+        chr <- .champ_norm_chr(Block$chr[i])
+        sel <- .champ_norm_chr(pf$CHR) == chr & !is.na(pf$MAPINFO) &
+            pf$MAPINFO >= Block$start[i] & pf$MAPINFO <= Block$end[i]
+        intersect(rownames(pf)[which(sel)], rownames(beta))
+    }
+
+    profile_plot <- function(i) {
+        ids <- region_probes(i)
+        if (!length(ids)) return(.champ_gui_empty("No probe of this block is in 'beta'."))
+        ids <- ids[order(pf[ids, "MAPINFO"])]
+        mat <- beta[ids, , drop = FALSE]
+        pal <- .champ_gui_palette(n.gr)
+        p <- plotly::plot_ly()
+        for (g in seq_len(n.gr)) {
+            cols <- which(pheno == levels(pheno)[g])
+            if (!length(cols)) next
+            p <- plotly::add_trace(
+                p, x = pf[ids, "MAPINFO"],
+                y = rowMeans(mat[, cols, drop = FALSE], na.rm = TRUE),
+                type = "scatter", mode = "lines+markers", name = levels(pheno)[g],
+                line = list(color = pal[g], width = 3), marker = list(size = 5),
+                text = ids, hovertemplate = "%{text}<br>%{x}<br>%{y:.2f}<extra></extra>")
+        }
+        plotly::layout(p, title = Block$label[i],
+                       xaxis = list(title = "position (bp)"),
+                       yaxis = list(title = "mean beta", range = c(0, 1)),
+                       margin = list(b = 60, t = 50))
+    }
+
+    stats_plot <- function(i) {
+        cols <- intersect(c("value", "area", "p.valueArea", "p.value", "L", "cluster"),
+                          colnames(Block))
+        cols <- setdiff(cols, c("start", "end"))
+        if (!length(cols)) return(.champ_gui_empty("No block statistic available."))
+        d <- data.frame(stat = cols,
+                        value = vapply(cols, function(nm) {
+                            v <- suppressWarnings(as.numeric(Block[i, nm]))
+                            if (is.na(v)) 0 else v
+                        }, numeric(1)))
+        p <- plotly::plot_ly(d, x = ~stat, y = ~value, type = "bar",
+                             text = signif(d$value, 3), textposition = "auto")
+        plotly::layout(p, title = "Block statistics", xaxis = list(title = ""))
+    }
+
+    probe_table <- function(i) {
+        ids <- region_probes(i)
+        if (!length(ids)) return(DT::datatable(data.frame(Message = "No probe in this block.")))
+        ann <- pf[ids, intersect(c("CHR", "MAPINFO", "gene", "feature", "cgi", "Type"),
+                                 colnames(pf)), drop = FALSE]
+        mat <- beta[ids, , drop = FALSE]
+        DT::datatable(data.frame(Probe = ids, ann,
+                                 MeanBeta = round(rowMeans(mat, na.rm = TRUE), 3),
+                                 check.names = FALSE),
+                      rownames = FALSE, options = list(pageLength = 15))
+    }
+
+    ui <- shiny::fluidPage(
+        theme = .champ_gui_theme(),
+        shiny::tags$head(shiny::tags$style(
+            "#blocktable {font-size:80%;}",
+            "#profile {height:60vh !important;}",
+            "#stats {height:40vh !important;}")),
+        shiny::titlePanel("Block Overview"),
+        shiny::sidebarLayout(
+            shiny::sidebarPanel(
+                width = 3,
+                shiny::selectInput("block", "Block:", choices = stats::setNames(seq_len(nrow(Block)), Block$label),
+                                   selected = 1L)),
+            shiny::mainPanel(
+                shiny::tabsetPanel(
+                    shiny::tabPanel("Blocks", DT::dataTableOutput("blocktable")),
+                    shiny::tabPanel("Profile",
+                                    plotly::plotlyOutput("profile"),
+                                    plotly::plotlyOutput("stats")),
+                    shiny::tabPanel("Probes", DT::dataTableOutput("probes")))
             )
-          )#tabsetPanel
-        )#mainPanel
-      )#sidebarLayout
-    ),#ui
-    server = function(input, output){
-      
-      Block_repalce <- eventReactive(input$blocksearch,
-                                     {
-                                       gc()
-                                       pvalueCutoff <- as.numeric(input$pvaluebin)
-                                       mincluserCutoff <- as.numeric(input$mincluserbin)
-                                       block.idx <- as.numeric(input$blockbin)
-                                       
-                                       index <- which(Block$posCL.m[,"Chr"] == Block$Block[block.idx,"chr"] & 
-                                                        Block$posCL.m[,"Pos"] >= Block$Block[block.idx,"start"] & 
-                                                        Block$posCL.m[,"Pos"] <= Block$Block[block.idx,"end"])
-                                       
-                                       clustersinblock <- clustertmp[which(clustertmp$Blockindex==paste("Block",block.idx,sep="_")),] 
-                                       cpg <- myBlock$allCLID.v[which(myBlock$allCLID.v %in% rownames(clustersinblock))]
-                                       
-                                       cpg.pos <- aggregate(probe.features[names(cpg),"MAPINFO"],by=list(cpg),function(x) c(min(x),max(x),max(x)-min(x)))
-                                       cpg.pos.final <- cpg.pos[,2]
-                                       rownames(cpg.pos.final) <- cpg.pos[,1]
-                                       colnames(cpg.pos.final) <- c("Start","End","Width")
-                                       
-                                       cpg.gene <- aggregate(probe.features[names(cpg),"gene"],by=list(cpg),function(x) paste(unique(x),collapse=","))
-                                       cpg.gene.final <- cpg.gene[,2]
-                                       names(cpg.gene.final) <- cpg.gene[,1]
-                                       
-                                       clustersinblock <- data.frame(clustersinblock[,1:3],
-                                                                     cpg.pos.final[rownames(clustersinblock),],
-                                                                     Number=table(cpg)[rownames(clustersinblock)],
-                                                                     gene=cpg.gene.final[rownames(clustersinblock)],
-                                                                     clustersinblock[4:9])
-                                       
-                                       OSindex <- index[which(substr(names(index),1,2)=="OS")]
-                                       CPGIindex <- index[which(substr(names(index),1,2)=="CP")]
-                                       SHindex <- index[which(substr(names(index),1,2)=="SH")]
-                                       
-                                       Group <- split(as.data.frame(t(Block$avbetaCL.m[OSindex,])),pheno)
-                                       CPGIpos <- Block$posCL.m[CPGIindex,1]
-                                       G <- lapply(Group,function(x) t(x))
-                                       G <- lapply(G,function(h) data.frame(Sample=rep(colnames(h),each=nrow(h)),ID=rep(rownames(h),ncol(h)),pos=rep(Block$posCL.m[OSindex,1],ncol(h)),Value=as.vector(h)))
-                                       
-                                       if(length(CPGIindex)>0)
-                                         cpgidf <- data.frame(ID=rownames(Block$posCL.m)[CPGIindex],pos=Block$posCL.m[CPGIindex,1],y=1)
-                                       else
-                                         cpgidf=NULL
-                                       
-                                       list(pvalueCutoff=pvalueCutoff,
-                                            mincluserCutoff=mincluserCutoff,
-                                            G=G,
-                                            cpgidf=cpgidf,
-                                            block.idx=block.idx,
-                                            clustersinblock=clustersinblock)
-                                     })
-      Cutoff_repalce <- eventReactive(input$go,
-                                      {
-                                        gc()
-                                        pvalueCutoff <- as.numeric(input$pvaluebin)
-                                        mincluserCutoff <- as.numeric(input$mincluserbin)
-                                        myblock <- Block$Block[which(Block$Block$p.valueArea <= pvalueCutoff & Block$Block$L >= mincluserCutoff),]
-                                        mycpgtable <- cpgtmp[which(cpgtmp$Blockindex %in% rownames(myblock)),]
-                                        
-                                        list(pvalueCutoff=pvalueCutoff,
-                                             mincluserCutoff=mincluserCutoff,
-                                             myblock=myblock,
-                                             mycpgtable=mycpgtable)
-                                      })
-      
-      output$blocktable <- DT::renderDataTable({
-        datatable <- Cutoff_repalce()$myblock
-        datatable <- data.frame(ID=rownames(datatable),datatable)
-      },options = list(pageLength=20))
-      output$cpgtable <- DT::renderDataTable({
-        datatable <- Cutoff_repalce()$mycpgtable
-        datatable <- data.frame(ID=rownames(datatable),datatable)
-      },options = list(pageLength=20))
-      output$blockplot <- renderPlotly({
-        innerblockplot(Block_repalce()$G,Block_repalce()$cpgidf,Block_repalce()$block.idx)
-      })
-      output$clustertable <- DT::renderDataTable({
-        datatable <- Block_repalce()$clustersinblock
-        datatable <- data.frame(ID=rownames(datatable),datatable)
-      },options = list(pageLength=8))
-      
+        )
+    )
+
+    server <- function(input, output, session) {
+        selected <- shiny::reactive({
+            i <- suppressWarnings(as.integer(input$block))
+            if (is.na(i) || i < 1L || i > nrow(Block)) 1L else i
+        })
+        shiny::observeEvent(input$blocktable_rows_selected, {
+            i <- input$blocktable_rows_selected
+            if (length(i) == 1L) shiny::updateSelectInput(session, "block", selected = i)
+        }, ignoreNULL = TRUE)
+        output$blocktable <- DT::renderDataTable({
+            DT::datatable(Block, rownames = FALSE, selection = "single",
+                          options = list(pageLength = 15))
+        })
+        output$profile <- plotly::renderPlotly(profile_plot(selected()))
+        output$stats <- plotly::renderPlotly(stats_plot(selected()))
+        output$probes <- DT::renderDataTable(probe_table(selected()))
     }
-  )
-  runApp(app)
+
+    app <- shiny::shinyApp(ui = ui, server = server)
+    talk("[<<<<<< Block.GUI END >>>>>>>]")
+    if (!isTRUE(runApp)) return(app)
+    invisible(shiny::runApp(app))
 }

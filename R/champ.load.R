@@ -1,328 +1,162 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("sampleNames<-","EPIC.manifest.hg19","EPIC.manifest.pop.hg19","hm450.manifest.hg19","hm450.manifest.pop.hg19","multi.hit","probe.features","probe.features.epic"))
+# =============================================================================
+#  champ.load -- load an Illumina methylation experiment
+#
+#  Two back-ends:
+#    * "ChAMP"  : champ.import() + champ.filter()  (no minfi needed)
+#    * "minfi"  : minfi::read.metharray.exp() + preprocessRaw(), then the same
+#                 filtering engine, so both paths behave identically.
+# =============================================================================
 
-champ.load <- function(directory = getwd(),
-                       method = "ChAMP",
-                       methValue="B",
-                       autoimpute=TRUE,
-                       filterDetP=TRUE,
-                       ProbeCutoff=0,
-                       SampleCutoff=0.1,
-                       detPcut=0.01,
-                       filterBeads=TRUE,
-                       beadCutoff=0.05,
-                       filterNoCG=TRUE,
-                       filterSNPs=TRUE,
-                       population=NULL,
-                       filterMultiHit=TRUE,
-                       filterXY=TRUE,
-                       force=FALSE,
-                       arraytype="450K")
-{
-  message("[===========================]")
-  message("[<<<< ChAMP.LOAD START >>>>>]")
-  message("-----------------------------")
-  
-  mybeadcount <- function(x)
-  {
-    #select out bead count dataframe
-    getNBeads(x) -> nb
-    #match rownames of beadcount dataframe to addresses
-    getProbeInfo(x,type="I")->typeIadd
-    match(typeIadd$AddressA,rownames(nb))->typeImatchA
-    match(typeIadd$AddressB,rownames(nb))->typeImatchB
-    
-    #match rownames of beadcount dataframe to addresses
-    getProbeInfo(x,type="II")->typeIIadd
-    match(typeIIadd$Address,rownames(nb))->typeIImatch
-    
-    nb->nbcg
-    
-    locusNames <- getManifestInfo(x, "locusNames")
-    bc_temp <- matrix(NA_real_, ncol = ncol(x), nrow = length(locusNames),
-                      dimnames = list(locusNames, sampleNames(x)))
-    
-    TypeII.Name <- getProbeInfo(x, type = "II")$Name
-    bc_temp[TypeII.Name, ] <- nbcg[getProbeInfo(x, type = "II")$AddressA,]
-    
-    TypeI <- getProbeInfo(x, type = "I")
-    
-    bc_temp->bcB
-    bc_temp->bcA        
-    
-    bcB[TypeI$Name, ] <- nbcg[TypeI$AddressB,]
-    bcA[TypeI$Name, ] <- nbcg[TypeI$AddressA,]
-    
-    which(bcB<3) -> bcB3
-    which(bcA<3) -> bcA3
-    bcA->bcA2
-    bcB->bcB2
-    bcA2[bcA3]<-NA
-    bcA2[bcB3]<-NA
-    
-    data.frame(bcA2)->bc
+#' Bead counts from an RGChannelSet
+#' @keywords internal
+.champ_beadcount <- function(rgSet) {
+    nb <- minfi::getNBeads(rgSet)
+    loci <- minfi::getManifestInfo(rgSet, "locusNames")
+    bc <- matrix(NA_real_, nrow = length(loci), ncol = ncol(rgSet),
+                 dimnames = list(loci, minfi::sampleNames(rgSet)))
+    typeII <- minfi::getProbeInfo(rgSet, type = "II")
+    typeI  <- minfi::getProbeInfo(rgSet, type = "I")
+    addrA <- typeII$AddressA
+    okII <- addrA %in% rownames(nb)
+    bc[typeII$Name[okII], ] <- nb[addrA[okII], , drop = FALSE]
+
+    bcA <- bcB <- bc
+    okA <- typeI$AddressA %in% rownames(nb)
+    okB <- typeI$AddressB %in% rownames(nb)
+    bcA[typeI$Name[okA], ] <- nb[typeI$AddressA[okA], , drop = FALSE]
+    bcB[typeI$Name[okB], ] <- nb[typeI$AddressB[okB], , drop = FALSE]
+    bad <- (bcA < 3) | (bcB < 3)
+    bad[is.na(bad)] <- TRUE
+    bc[bad] <- NA_real_
     bc
-  }
-  
-  if(method=="minfi")
-  {
-    message("\n[ Loading Data with Minfi Method ]")
-    message("----------------------------------")
-    
-    message("Loading data from ", directory)
-    
-    myDir <- directory
-    suppressWarnings(targets <- read.metharray.sheet(myDir))
-    rgSet <- read.metharray.exp(targets = targets,extended=TRUE,force=force)
-    if(arraytype=="EPIC") rgSet@annotation <- c(array="IlluminaHumanMethylationEPIC",annotation="ilm10b4.hg19")
-    
-    sampleNames(rgSet)=rgSet[[1]]
-    pd <- pData(rgSet)
-    mset <- preprocessRaw(rgSet)
-    detP <- detectionP(rgSet)
-    message("<< Read DataSet Success. >>\n")
-    
-    if(methValue=="B") tmp = getBeta(mset, "Illumina") else tmp = getM(mset)
-    tmp[detP >= detPcut] <- NA 
-    message("The fraction of failed positions per sample\n 
-            (You may need to delete samples with high proportion of failed probes\n): ")
-    
-    numfail <- matrix(colMeans(is.na(tmp)))
-    rownames(numfail) <- colnames(detP)
-    colnames(numfail) <- "Failed CpG Fraction."
-    print(numfail)
-    RemainSample <- which(numfail < SampleCutoff)
-    
-    if(any(numfail >= SampleCutoff))
-      message("The detSamplecut parameter is : ",SampleCutoff, "\nSamples : ",
-              paste(rownames(numfail)[which(numfail >= SampleCutoff)],collapse=",")," will be deleted.\n",
-              "There are ",length(RemainSample)," samples left for analysis.\n")
-    
-    rgSet <- rgSet[,RemainSample]
-    detP <- detP[,RemainSample]
-    mset <- mset[,RemainSample]
-    pd <- pd[RemainSample,]
-    tmp <- tmp[,RemainSample]
-    
-    
-    if(filterDetP)
-    {
-      mset.f = mset[rowSums(is.na(tmp)) <= ProbeCutoff*ncol(detP),]
-      
-      if(ProbeCutoff==0)
-      {
-        message("Filtering probes with a detection p-value above ",detPcut," in one or more samples has removed ",dim(mset)[1]-dim(mset.f)[1]," probes from the analysis. If a large number of probes have been removed, ChAMP suggests you to identify potentially bad samples.")
-      }else{
-        message("Filtering probes with a detection p-value above ",detPcut," in at least ",ProbeCutoff*100,"% of samples has removed ",dim(mset)[1]-dim(mset.f)[1]," probes from the analysis. If a large number of probes have been removed, ChAMP suggests you look at the failedSample file to identify potentially bad samples.")
-      }
-      mset=mset.f
-      tmp <- tmp[rowSums(is.na(tmp)) <= ProbeCutoff*ncol(detP),]
-      message("<< Filter DetP Done. >>\n")
-    }
-    
-    if(sum(is.na(tmp))==0){
-      message("\nThere is no NA values in your matrix, there is no need to imputation.\n")
-    }else
-    {
-      message("\nThere are ",sum(is.na(tmp))," NA remain in filtered Data Set. Impute can be done for remain NAs, but not suitable for small number samples. For small Data Set (like only 20 samples), we suggest you set parameter ProbeCutoff as 0 in champ.load() here, which would remove all NA involved probe no matter how many samples of those probes are NA.\n")
-    }
-    
-    if(autoimpute & sum(is.na(tmp)) > 0){
-      message("Impute will be conducted here for remain ",sum(is.na(tmp)),"  NAs. Note that if you don't do this, NA values would be kept in your data set. You may use champ.impute() function to do more complex imputation as well.")
-      # Open a file to send messages to save lot's of information from impute.knn
-      message("\nImpute function is working now, it may need couple minutes...")
-      zz <- file("ImputeMessage.Rout", open="wt")
-      sink(zz)
-      sink(zz, type="message")
-      tmp <- impute.knn(tmp,k=5)$data
-      sink(type="message")
-      sink()
-      message("<< Imputation Done. >>\n")
-    }
-    
-    
-    if(filterBeads)
-    {
-      bc=mybeadcount(rgSet)
-      bc2=bc[rowSums(is.na(bc)) < beadCutoff*(ncol(bc)),]
-      
-      mset.f2 = mset[featureNames(mset) %in% row.names(bc2),]
-      tmp <- tmp[rownames(tmp) %in% row.names(bc2),]
-      message("Filtering probes with a beadcount <3 in at least ",beadCutoff*100,"% of samples, has removed ",dim(mset)[1]-dim(mset.f2)[1]," from the analysis.")
-      mset=mset.f2
-      message("<< Filter Beads Done. >>\n")
-    }
-    
-    if(filterNoCG)
-    {
-      mset.f2=dropMethylationLoci(mset,dropCH=T)
-      tmp <- tmp[rownames(tmp) %in% featureNames(mset.f2),]
-      message("Filtering non-cg probes, has removed ",dim(mset)[1]-dim(mset.f2)[1]," from the analysis.")
-      mset <- mset.f2
-      message("<< Filter NoCG Done. >>\n")
-    }
-    
-    if(filterSNPs)
-    {
-      if(arraytype=="450K")
-      {
-        if(is.null(population))
-        {
-          message("Using general 450K SNP list for filtering.")
-          data(hm450.manifest.hg19)
-          maskname <- rownames(hm450.manifest.hg19)[which(hm450.manifest.hg19$MASK_general==TRUE)]
-        }else if(!population %in% c("AFR","EAS","EUR","SAS","AMR","GWD","YRI","TSI",
-                                    "IBS","CHS","PUR","JPT","GIH","CHB","STU","ITU",
-                                    "LWK","KHV","FIN","ESN","CEU","PJL","ACB","CLM",
-                                    "CDX","GBR","BEB","PEL","MSL","MXL","ASW"))
-        {
-          message("Using general 450K SNP list for filtering.")
-          data(hm450.manifest.hg19)
-          maskname <- rownames(hm450.manifest.hg19)[which(hm450.manifest.hg19$MASK_general==TRUE)]
-        }else
-        {
-          message("Using ",population," specific 450K SNP list for filtering.")
-          data(hm450.manifest.pop.hg19)
-          maskname <- rownames(hm450.manifest.pop.hg19)[which(hm450.manifest.pop.hg19[,paste("MASK_general_",population,sep="")]==TRUE)]
+}
+
+#' Load methylation array data
+#'
+#' @param directory directory containing the IDAT files (and, for method
+#'   "minfi", a sample sheet).
+#' @param method "ChAMP" (annotation based, default) or "minfi".
+#' @param methValue "B" (beta) or "M" (M-value).
+#' @param autoimpute impute remaining missing values.
+#' @param filterDetP,filterBeads,filterNoCG,filterSNPs,filterMultiHit,filterXY
+#'   filtering toggles, see champ.filter().
+#' @param ProbeCutoff,SampleCutoff,detPcut,beadCutoff filtering thresholds.
+#' @param population SNP mask population.
+#' @param force passed to minfi::read.metharray.exp().
+#' @param arraytype "450K", "EPICv1" or "EPICv2" ("EPIC" = "EPICv2").
+#' @param verbose print progress.
+#'
+#' @return list with beta (or M), pd, intensity, detP and, for method
+#'   "minfi", mset and rgSet.
+#' @export
+champ.load <- function(directory = getwd(), method = "ChAMP", methValue = "B",
+                       autoimpute = TRUE, filterDetP = TRUE, ProbeCutoff = 0,
+                       SampleCutoff = 0.1, detPcut = 0.01, filterBeads = TRUE,
+                       beadCutoff = 0.05, filterNoCG = TRUE, filterSNPs = TRUE,
+                       population = NULL, filterMultiHit = TRUE, filterXY = TRUE,
+                       force = FALSE, arraytype = "450K", verbose = TRUE) {
+    .champ_msg("[===========================]")
+    .champ_msg("[<<<< ChAMP.LOAD START >>>>>]")
+    .champ_msg("-----------------------------")
+    at <- .champ_arraytype(arraytype)
+    method <- match.arg(method, c("ChAMP", "minfi"))
+
+    if (identical(method, "minfi")) {
+        .champ_require("minfi", "champ.load(method = 'minfi')")
+        .champ_msg("\n[ Loading Data with Minfi Method ]")
+        .champ_msg("----------------------------------")
+        .champ_msg("Loading data from ", directory)
+
+        targets <- .champ_try(suppressWarnings(minfi::read.metharray.sheet(directory)))
+        if (is.null(targets) || !nrow(targets)) {
+            .champ_stop("minfi could not read a sample sheet in ", directory,
+                        ".\n  Provide a sample sheet (csv) or use method = 'ChAMP'.")
         }
-      }else if(arraytype == "EPIC")
-      {
-        if(is.null(population))
-        {
-          message("Using general EPIC SNP list for filtering.")
-          data(EPIC.manifest.hg19)
-          maskname <- rownames(EPIC.manifest.hg19)[which(EPIC.manifest.hg19$MASK_general==TRUE)]
-        }else if(!population %in% c("AFR","EAS","EUR","SAS","AMR","GWD","YRI","TSI",
-                                    "IBS","CHS","PUR","JPT","GIH","CHB","STU","ITU",
-                                    "LWK","KHV","FIN","ESN","CEU","PJL","ACB","CLM",
-                                    "CDX","GBR","BEB","PEL","MSL","MXL","ASW"))
-        {
-          message("Using general EPIC SNP list for filtering.")
-          data(EPIC.manifest.hg19)
-          maskname <- rownames(EPIC.manifest.hg19)[which(EPIC.manifest.hg19$MASK_general==TRUE)]
-        }else
-        {
-          message("Using ",population," specific EPIC SNP list for filtering.")
-          data(EPIC.manifest.pop.hg19)
-          maskname <- rownames(EPIC.manifest.pop.hg19)[which(EPIC.manifest.pop.hg19[,paste("MASK_general_",population,sep="")]==TRUE)]
+        rgSet <- minfi::read.metharray.exp(targets = targets, extended = TRUE,
+                                           force = force)
+        if (identical(at, "EPICv1")) {
+            rgSet@annotation <- c(array = "IlluminaHumanMethylationEPIC",
+                                  annotation = "ilm10b4.hg19")
+        } else if (identical(at, "EPICv2")) {
+            rgSet@annotation <- c(array = "IlluminaHumanMethylationEPICv2",
+                                  annotation = "20a1.hg38")
         }
-      } else if(arraytype == "Mouse") {
-        message("Sorry, currently SNP filtering does not support mouse.")
-      }
-      mset.f2=mset[!featureNames(mset) %in% maskname,]
-      tmp <- tmp[!rownames(tmp) %in% maskname,]
-      message("Filtering probes with SNPs as identified in Zhou's Nucleic Acids Research Paper, 2016, has removed ",dim(mset)[1]-dim(mset.f2)[1]," from the analysis.")
-      mset=mset.f2
-      message("<< Filter SNP Done. >>\n")
+        if ("Sample_Name" %in% colnames(targets)) {
+            minfi::sampleNames(rgSet) <- as.character(targets$Sample_Name)
+        }
+        pd <- as.data.frame(minfi::pData(rgSet), stringsAsFactors = FALSE)
+        if (!"Sample_Name" %in% colnames(pd)) pd$Sample_Name <- colnames(rgSet)
+        mset <- minfi::preprocessRaw(rgSet)
+        detP <- minfi::detectionP(rgSet)
+        .champ_msg("<< Read DataSet Success. >>\n")
+
+        beta <- if (identical(methValue, "B")) {
+            minfi::getBeta(mset, "Illumina")
+        } else {
+            minfi::getM(mset)
+        }
+        beta[detP >= detPcut] <- NA_real_
+
+        numfail <- matrix(colMeans(is.na(beta)))
+        rownames(numfail) <- colnames(detP)
+        colnames(numfail) <- "Failed CpG Fraction."
+        print(numfail)
+
+        beadcount <- if (isTRUE(filterBeads)) {
+            .champ_try(.champ_beadcount(rgSet))
+        } else NULL
+
+        res <- champ.filter(beta = beta, pd = pd, detP = detP,
+                            beadcount = beadcount, autoimpute = autoimpute,
+                            filterDetP = filterDetP, ProbeCutoff = ProbeCutoff,
+                            SampleCutoff = SampleCutoff, detPcut = detPcut,
+                            filterBeads = filterBeads && !is.null(beadcount),
+                            beadCutoff = beadCutoff, filterNoCG = filterNoCG,
+                            filterSNPs = filterSNPs, population = population,
+                            filterMultiHit = filterMultiHit, filterXY = filterXY,
+                            arraytype = at, verbose = verbose)
+
+        samples <- colnames(res$beta)
+        probes  <- rownames(res$beta)
+        rgSet <- rgSet[, samples]
+        mset <- mset[minfi::featureNames(mset) %in% probes, ]
+        mset <- mset[match(probes, minfi::featureNames(mset)), ]
+        intensity <- minfi::getMeth(mset) + minfi::getUnmeth(mset)
+        detP <- detP[probes, samples, drop = FALSE]
+
+        .champ_msg("The analysis will proceed with ", nrow(res$beta), " probes and ",
+                   ncol(res$beta), " samples.\n")
+        .champ_msg("[<<<<< ChAMP.LOAD END >>>>>>]")
+        .champ_msg("[===========================]")
+        .champ_msg("[You may want to process champ.QC() next.]\n")
+        return(list(mset = mset, rgSet = rgSet, pd = res$pd,
+                    intensity = intensity, beta = res$beta, detP = detP,
+                    arraytype = at))
     }
-    
-    if(filterMultiHit)
-    {
-      data(multi.hit)
-      mset.f2=mset[!featureNames(mset) %in% multi.hit$TargetID,]
-      tmp <- tmp[!rownames(tmp) %in% multi.hit$TargetID,]
-      message("Filtering probes that align to multiple locations as identified in Nordlund et al, has removed ",dim(mset)[1]-dim(mset.f2)[1]," from the analysis.")
-      mset=mset.f2
-      message("<< Filter MultiHit Done. >>\n")
-    }
-    
-    if(filterXY)
-    {
-      if(arraytype=="EPIC") { 
-        data(probe.features.epic) 
-      } else if (arraytype == "450K") {
-        data(probe.features)
-      } else if (arraytype == "Mouse") {
-        data(probe.features.mouse)
-      } else {
-        stop("ArrayType parameter is wrong, it must be 450K, EPIC or Mouse.")
-      }
-      
-      autosomes=probe.features[!probe.features$CHR %in% c("X","Y"), ]
-      mset.f2=mset[featureNames(mset) %in% row.names(autosomes),]
-      tmp <- tmp[rownames(tmp) %in% row.names(autosomes),]
-      message("Filtering probes on the X or Y chromosome has removed ",dim(mset)[1]-dim(mset.f2)[1]," from the analysis.")
-      mset=mset.f2
-      message("<< Filter XY chromosome Done. >>\n")
-    }
-    
-    
-    message(paste(if(methValue=="B") "[Beta" else "[M","value is selected as output.]\n"))
-    beta.raw <- tmp
-    
-    intensity <-  minfi::getMeth(mset) + minfi::getUnmeth(mset)
-    detP <- detP[which(row.names(detP) %in% row.names(beta.raw)),]
-    
-    if(min(beta.raw, na.rm=TRUE)<=0) beta.raw[beta.raw<=0] <- min(beta.raw[beta.raw > 0])
-    message("Zeros in your dataset have been replaced with smallest positive value.\n")
-    
-    if(max(beta.raw, na.rm=TRUE)>=0) beta.raw[beta.raw>=1] <- max(beta.raw[beta.raw < 1])
-    message("One in your dataset have been replaced with largest value below 1.\n")
-    
-    message("The analysis will be proceed with ", dim(beta.raw)[1], " probes and ",dim(beta.raw)[2], " samples.\n")
-    message("Current Data Set contains ",sum(is.na(beta.raw))," NA in ", if(methValue=="B") "[Beta]" else "[M]"," Matrix.\n")
-    
-    message("[<<<<< ChAMP.LOAD END >>>>>>]")
-    message("[===========================]")
-    message("[You may want to process champ.QC() next.]\n")
-    return(list(mset=mset,rgSet=rgSet,pd=pd,intensity=intensity,beta=beta.raw,detP=detP))
-    
-  } else {
-    message("\n[ Loading Data with ChAMP Method ]")
-    message("----------------------------------")
-    
-    message("Note that ChAMP method will NOT return rgSet or mset, they object defined by minfi. Which means, if you use ChAMP method to load data, you can not use SWAN or FunctionNormliazation method in champ.norm() (you can use BMIQ or PBC still). But All other function should not be influenced.\n")
-    
-    
-    myImport <- champ.import(directory,arraytype=arraytype)
-    
-    if(methValue=="B")
-      myLoad <- champ.filter(beta=myImport$beta,
-                             M=NULL,
-                             pd=myImport$pd,
-                             intensity=myImport$intensity,
-                             Meth=NULL,
-                             UnMeth=NULL,
-                             detP=myImport$detP,
-                             beadcount=myImport$beadcount,
-                             autoimpute=autoimpute,
-                             filterDetP=filterDetP,
-                             ProbeCutoff=ProbeCutoff,
-                             SampleCutoff=SampleCutoff,
-                             detPcut=detPcut,
-                             filterBeads=filterBeads,
-                             beadCutoff=beadCutoff,
-                             filterNoCG=filterNoCG,
-                             filterSNPs=filterSNPs,
-                             population=population,
-                             filterMultiHit=filterMultiHit,
-                             filterXY=filterXY,
-                             arraytype=arraytype)
-    else
-      myLoad <- champ.filter(beta=NULL,
-                             M=myImport$M,
-                             pd=myImport$pd,
-                             intensity=myImport$intensity,
-                             Meth=NULL,
-                             UnMeth=NULL,
-                             detP=myImport$detP,
-                             beadcount=myImport$beadcount,
-                             autoimpute=autoimpute,
-                             filterDetP=filterDetP,
-                             ProbeCutoff=ProbeCutoff,
-                             SampleCutoff=SampleCutoff,
-                             detPcut=detPcut,
-                             filterBeads=filterBeads,
-                             beadCutoff=beadCutoff,
-                             filterNoCG=filterNoCG,
-                             filterSNPs=filterSNPs,
-                             population=population,
-                             filterMultiHit=filterMultiHit,
-                             filterXY=filterXY,
-                             arraytype=arraytype)
-    
-    message("[<<<<< ChAMP.LOAD END >>>>>>]")
-    message("[===========================]")
-    message("[You may want to process champ.QC() next.]\n")
-    return(myLoad)
-  }
+
+    .champ_msg("\n[ Loading Data with ChAMP Method ]")
+    .champ_msg("----------------------------------")
+    .champ_msg("Note that the ChAMP method does NOT return rgSet or mset, so SWAN ",
+               "and FunctionalNormalization are unavailable; BMIQ and PBC work fine.\n")
+
+    myImport <- champ.import(directory, arraytype = at, verbose = verbose)
+    res <- champ.filter(
+        beta = if (identical(methValue, "B")) myImport$beta else NULL,
+        M    = if (identical(methValue, "B")) NULL else myImport$M,
+        pd = myImport$pd, intensity = myImport$intensity,
+        Meth = myImport$Meth, UnMeth = myImport$UnMeth,
+        detP = myImport$detP, beadcount = myImport$beadcount,
+        autoimpute = autoimpute, filterDetP = filterDetP,
+        ProbeCutoff = ProbeCutoff, SampleCutoff = SampleCutoff,
+        detPcut = detPcut, filterBeads = filterBeads,
+        beadCutoff = beadCutoff, filterNoCG = filterNoCG,
+        filterSNPs = filterSNPs, population = population,
+        filterMultiHit = filterMultiHit, filterXY = filterXY,
+        arraytype = at, verbose = verbose)
+
+    .champ_msg("[<<<<< ChAMP.LOAD END >>>>>>]")
+    .champ_msg("[===========================]")
+    .champ_msg("[You may want to process champ.QC() next.]\n")
+    res$arraytype <- at
+    res
 }

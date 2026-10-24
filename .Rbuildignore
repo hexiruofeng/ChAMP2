@@ -1,0 +1,8 @@
+^\.github$
+^docker$
+^COMPATIBILITY\.md$
+^NEWS\.md$
+^vignettes/legacy$
+^.*\.Rproj$
+^\.Rproj\.user$
+^README\.Rmd$

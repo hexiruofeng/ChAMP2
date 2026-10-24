@@ -1,48 +1,20 @@
 \name{champ.ebGSEA}
 \alias{champ.ebGSEA}
-\title{
-    Empirical Bayes GSEA method.
-}
-\description{
-    This is a newly created method for conduct bias-free GSEA from 450K or EPIC data set. This method use global test to detect significance of genes from DNA methylation data sets directly, instead of simply select genes mapped my DMPs pr DMRs. By applying this method, users could find GSEA without bias from inequality number of CpGs of genes, and detect some marginal significant genes for GSEA process. After global test, Empirical Bayes method would use wilcox test to enrich genes to pathways. Note that you can directly use champ.GSEA() to use this method, just need to set "method" parameter as "ebay" in champ.GSEA() to run this method.
-}
-
+\title{Empirical Bayes gene set enrichment}
 \usage{
-champ.ebGSEA(beta=myNorm, pheno=myLoad$pd$Sample_Group, minN=5, adjPval=0.05, arraytype="450K", cores=1)
+champ.ebGSEA(beta = NULL, pheno = NULL, minN = 5L, adjPval = 0.05,
+    arraytype = "450K", cores = 1L, verbose = TRUE)
 }
-
 \arguments{
-	\item{beta}{A matrix of values representing the methylation scores for each sample (M or B). Better to be imputed and normalized data. (default = myNorm)}
-    \item{pheno}{User needs to provide phenotype information to conduct global test. (default = myLoad$pd$Sample_Group)}
-    \item{minN}{Minium number of common genes threshold in one geneset and candidate gene list, if less than this value, the p value of this geneset would be set 1. (default = 5)}
-    \item{adjPval}{Adjusted p value cutoff for all calculated GSEA result. (default = 0.05)}
-    \item{arraytype}{Which kind of array your data set is? (default = "450K")}
-    \item{cores}{Number of parallel threads/cores used to accelarate. (default = 1)}
+  \item{beta}{beta value matrix.}
+  \item{pheno}{phenotype vector (binary factor or numeric covariate).}
+  \item{minN}{minimum number of genes per set.}
+  \item{adjPval}{adjusted p-value cutoff.}
+  \item{arraytype}{"450K", "EPICv1" or "EPICv2".}
+  \item{cores}{number of workers.}
+  \item{verbose}{print progress.}
 }
-\value{
-
-    There are three list:
-      GSEA contains all pathway's GSEA result in one list, and only significant pathways GSEA in another. 
-      EnrichedGene: contains enriched genes in each pathways.
-      gtResult: global test result for each gene.
-
-    Below are columns for list GSEA:
-    \item{nREP}{Number of genes enriched in this pathway.}
-    \item{AUC}{Area under curve from wilcox test.}
-    \item{P(WT)}{P value detected for each pathway from Wilcox Test.}
-    \item{P(KPMT)}{P value from Known Population Median Test}
-    \item{adjP}{Adjusted P value for each pathway, using BH method.}
-}
-
-\examples{
-    \dontrun{
-        myLoad <- champ.load(directory=system.file("extdata",package="ChAMPdata"))
-        myNorm <- champ.norm()
-        myGSEA.ebGSEA <- champ.ebGSEA(beta=myNorm,pheno=myLoad$pd$Sample_Group,arraytype="450K")
-        }
-}
-
-\author{
-Yuan Tian, Danyue Dong
-}
-\keyword{ GSEA }
+\description{Empirical Bayes gene set enrichment}
+\value{list with GSEA, EnrichGene and gtResult.}
+\seealso{\code{\link{champ.process}}, \code{\link{champ_check_env}}}
+\keyword{methods}

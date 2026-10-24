@@ -1,38 +1,82 @@
 Package: ChAMP
 Type: Package
-Title: Chip Analysis Methylation Pipeline for Illumina
-        HumanMethylation450 and EPIC
-Version: 2.29.1
-Date: 2020-02-18
-Description: The package includes quality control metrics, a selection of normalization methods and novel methods to identify differentially methylated regions and to highlight copy number alterations.
-Authors@R: c(person("Tian","Yuan", role = c("cre", "aut"),
+Title: ChAMP2: Chip Analysis Methylation Pipeline for Illumina
+    450K, EPIC and EPICv2
+Version: 2.32.0
+Date: 2026-10-24
+Description: The package includes quality control metrics, a selection of
+    normalization methods and novel methods to identify differentially
+    methylated regions and to highlight copy number alterations.  This is
+    the ChAMP2 fork, reworked so that a single source tree installs and runs
+    on every R release from 4.2.3 to 4.6.2 (Bioconductor 3.16 to 3.24).
+    Algorithms that used to be imported from packages which are no longer
+    reliably installable (impute, RPMM, kpmt) are bundled, the DMRcate
+    algorithm is available without the DMRcate package, and the optional
+    features fail with actionable messages instead of cryptic errors.
+Authors@R: c(person("Tian", "Yuan", role = c("cre", "aut"),
                     email = "champ450k@gmail.com"),
-		person("Tiffany","Morris",role = "ctb"),
+             person("Tiffany", "Morris", role = "ctb"),
              person("Lee", "Stirling", role = "ctb"),
              person("Andrew", "Feber", role = "ctb"),
-	     person("Andrew", "Teschendorff", role = "ctb"),
-	     person("Ankur", "Chakravarthy", role = "ctb"))
+             person("Andrew", "Teschendorff", role = "ctb"),
+             person("Ankur", "Chakravarthy", role = "ctb"))
 License: GPL-3
+URL: https://github.com/hexiruofeng/ChAMP2,
+    https://www.bioconductor.org/packages/ChAMP
+BugReports: https://github.com/hexiruofeng/ChAMP2/issues
 VignetteBuilder: knitr
-Depends: R (>= 3.3), minfi, ChAMPdata (>= 2.6.0),DMRcate,
-        Illumina450ProbeVariants.db,IlluminaHumanMethylationEPICmanifest, DT, RPMM
+Depends:
+    R (>= 4.2.3),
+    ChAMPdata (>= 2.6.0)
 Imports:
-        prettydoc,Hmisc,globaltest,sva,illuminaio,rmarkdown,IlluminaHumanMethylation450kmanifest,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,
-        limma, DNAcopy, preprocessCore,impute, marray, wateRmelon,
-        plyr,goseq,missMethyl,kpmt,ggplot2,
-        GenomicRanges,qvalue,isva,doParallel,bumphunter,quadprog,shiny,shinythemes,plotly
-        (>= 4.5.6),RColorBrewer,dendextend, matrixStats,combinat
+    limma,
+    matrixStats,
+    illuminaio,
+    DNAcopy,
+    preprocessCore,
+    bumphunter,
+    sva,
+    globaltest,
+    GenomicRanges,
+    IRanges,
+    S4Vectors,
+    GenomeInfoDb,
+    quadprog,
+    stats,
+    utils,
+    graphics,
+    grDevices
+Suggests:
+    minfi,
+    RPMM,
+    DMRcate,
+    impute,
+    kpmt,
+    goseq,
+    geneLenDataBase,
+    missMethyl,
+    dendextend,
+    shiny,
+    shinythemes,
+    plotly,
+    DT,
+    prettydoc,
+    rmarkdown,
+    knitr,
+    testthat (>= 3.0.0),
+    BiocManager,
+    org.Hs.eg.db
+Config/testthat/edition: 3
 biocViews: Microarray, MethylationArray, Normalization, TwoChannel,
-        CopyNumber, DNAMethylation
-Suggests: knitr,rmarkdown
-Author: Yuan Tian [cre,aut],
+    CopyNumber, DNAMethylation, DifferentialMethylation
+Author: Yuan Tian [cre, aut],
   Tiffany Morris [ctb],
   Lee Stirling [ctb],
   Andrew Feber [ctb],
   Andrew Teschendorff [ctb],
   Ankur Chakravarthy [ctb]
-Maintainer: Yuan Tian  <champ450k@gmail.com>
+Maintainer: Yuan Tian <champ450k@gmail.com>
 NeedsCompilation: no
-LazyData: true
-Packaged: 2018-03-22 04:29:01 UTC; tiany
-
+LazyData: false
+Encoding: UTF-8
+RoxygenNote: 7.3.2

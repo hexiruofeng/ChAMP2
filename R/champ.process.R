@@ -1,399 +1,220 @@
-champ.process <- function(runload=TRUE,
-                          directory = getwd(),
-                          filters=c("XY","DetP","Beads","NoCG","SNP","MultiHit"),
-                          #---champ.impute parameters below---#
-                          runimpute=TRUE,
-                          imputemethod="Combine",
-                          #---champ.QC parameters below---#
-                          runQC=TRUE,
-                          QCplots=c("mdsPlot","densityPlot","dendrogram"),
-                          #---champ.norm parameters below---#
-                          runnorm=TRUE,
-                          normalizationmethod="BMIQ",
-                          #---champ.SVD parameters below---#
-                          runSVD=TRUE,
-                          RGEffect=FALSE,
-                          #---champ.runCombat parameters below---#
-                          runCombat=TRUE,
-                          batchname=c("Slide"),
-                          #---champ.DMP parameters below---#
-                          runDMP=TRUE,
-                          #---champ.DMR parameters below---#
-                          runDMR=TRUE,
-                          DMRmethod="Bumphunter",
-                          #---champ.Block parameters below---#
-                          runBlock=TRUE,
-                          #---champ.GSEA parameters below---#
-                          runGSEA=TRUE,
-                          #---champ.EpiMod parameters below---#
-                          runEpiMod=TRUE,
-                          #---champ.CNA parameters below---#
-                          runCNA=TRUE,
-                          control=TRUE,
-                          controlGroup="champCtls",
-                          #---champ.refbase parameters below---#
-                          runRefBase=FALSE,
-                          #---universal settings---#
-                          compare.group=NULL,
-                          adjPVal=0.05,
-                          resultsDir="./CHAMP_RESULT/",
-                          arraytype="450K",
-                          PDFplot=TRUE,
-                          Rplot=TRUE,
-                          cores=3,
-                          saveStepresults=TRUE)
-{
-  message("[===========================]")
-  message("[<<< ChAMP.PROCESS START >>>]")
-  message("-----------------------------")
-  
-  message("This is champ.process() function, which would run ALL analysis ChAMP package can be done on your package. But sometimes it's not always very smoothly to conduct all function because of mistake in dataset or unsignificant results. This if you encounter problem in champ.proces(), you shall try run champ step by step.^_^")
-  
-  
-  if(!file.exists(resultsDir))
-  {
-    dir.create(resultsDir)
-    message("Creating results directory. All Results will be saved in ", resultsDir)
-  }
-  
-  CHAMP.RESULT <- list()
-  
-  ### Applying champ.load() function.
-  if(runload)
-  {
-    myfilter <- rep(FALSE,6)
-    names(myfilter) <- c("XY","DetP","Beads","NoCG","SNP","MultiHit")
-    myfilter[filters] <- TRUE
-    
-    message("\nRunning champ.load()...")
-    myLoad <- champ.load(directory=directory,
-                         methValue="B",
-                         autoimpute=TRUE,
-                         filterXY=myfilter["XY"],
-                         filterDetP=myfilter["DetP"],
-                         ProbeCutoff=0,
-                         SampleCutoff=0.1,
-                         detPcut=0.01,
-                         filterBeads=myfilter["Beads"],
-                         beadCutoff=0.05,
-                         filterNoCG=myfilter["NoCG"],
-                         filterSNPs=myfilter["SNP"],
-                         filterMultiHit=myfilter["MultiHit"],
-                         arraytype=arraytype)
-    if(saveStepresults)
-    {
-      save(myLoad,file=paste(resultsDir,"/myLoad.rda",sep=""))
-      message("champ.load()'s result \"myLoad\" has been saved in ",resultsDir," as \"myLoad.rda.\"")
+# =============================================================================
+#  champ.process -- the complete ChAMP pipeline in one call
+# =============================================================================
+
+#' Run the complete ChAMP pipeline
+#'
+#' Executes loading, imputation, QC, normalisation, SVD, ComBat, DMP, DMR,
+#' block, GSEA, CNA and reference-base correction in the documented order.
+#'
+#' Unlike the historical implementation, each step is wrapped so that an
+#' empty result (for example no significant DMP) does not abort the whole run,
+#' and the result list contains exactly the objects that were produced.
+#'
+#' @param runload,runimpute,runQC,runnorm,runSVD,runCombat,runDMP,runDMR,runBlock,
+#'   runGSEA,runEpiMod,runCNA,runRefBase step toggles.
+#' @param directory directory with the IDAT files.
+#' @param filters which filters to apply (any of "XY", "DetP", "Beads",
+#'   "NoCG", "SNP", "MultiHit").
+#' @param imputemethod "Combine", "Delete" or "KNN".
+#' @param QCplots any of "mdsPlot", "densityPlot", "dendrogram".
+#' @param normalizationmethod "BMIQ", "PBC", "SWAN" or "FunctionalNormalization".
+#' @param RGEffect include control probe effects in the SVD.
+#' @param batchname batch variables corrected by ComBat.
+#' @param DMRmethod "Bumphunter", "ProbeLasso" or "DMRcate".
+#' @param control,controlGroup CNA controls.
+#' @param compare.group two groups to compare.
+#' @param adjPVal adjusted p-value cutoff.
+#' @param resultsDir output directory.
+#' @param arraytype "450K", "EPICv1" or "EPICv2".
+#' @param PDFplot,Rplot plotting controls.
+#' @param cores number of workers.
+#' @param saveStepresults save intermediate objects as .rda.
+#' @param strict stop on the first error instead of continuing.
+#' @param verbose print progress.
+#'
+#' @return list of the step results.
+#' @export
+champ.process <- function(runload = TRUE, directory = getwd(),
+                          filters = c("XY", "DetP", "Beads", "NoCG", "SNP", "MultiHit"),
+                          runimpute = TRUE, imputemethod = "Combine",
+                          runQC = TRUE,
+                          QCplots = c("mdsPlot", "densityPlot", "dendrogram"),
+                          runnorm = TRUE, normalizationmethod = "BMIQ",
+                          runSVD = TRUE, RGEffect = FALSE,
+                          runCombat = TRUE, batchname = c("Slide"),
+                          runDMP = TRUE, runDMR = TRUE, DMRmethod = "Bumphunter",
+                          runBlock = TRUE, runGSEA = TRUE, runEpiMod = TRUE,
+                          runCNA = TRUE, control = TRUE,
+                          controlGroup = "champCtls", runRefBase = FALSE,
+                          compare.group = NULL, adjPVal = 0.05,
+                          resultsDir = "./CHAMP_RESULT/", arraytype = "450K",
+                          PDFplot = TRUE, Rplot = TRUE, cores = 3L,
+                          saveStepresults = TRUE, strict = FALSE,
+                          verbose = TRUE) {
+    .champ_msg("[===========================]")
+    .champ_msg("[<<< ChAMP.PROCESS START >>>]")
+    .champ_msg("-----------------------------")
+    at <- .champ_arraytype(arraytype)
+    if (!dir.exists(resultsDir)) dir.create(resultsDir, recursive = TRUE)
+    .champ_msg("All results will be saved in ", resultsDir)
+
+    RESULT <- list()
+    step <- function(name, expr) {
+        .champ_msg("\nRunning ", name, "...")
+        out <- if (isTRUE(strict)) expr else
+            tryCatch(expr, error = function(e) {
+                .champ_warn(name, " failed: ", conditionMessage(e))
+                structure(list(), class = "champ_step_error",
+                          message = conditionMessage(e))
+            })
+        if (isTRUE(saveStepresults) && !inherits(out, "champ_step_error")) {
+            f <- file.path(resultsDir, paste0(name, ".rda"))
+            save(out, file = f)
+            .champ_msg(name, " result saved in ", f)
+        }
+        if (!inherits(out, "champ_step_error")) RESULT[[name]] <<- out
+        gc()
+        .champ_msg("Run ", name, " over.\n")
+        invisible(out)
     }
-    message("Run champ.load() Over!\n")
-    gc()
-    CHAMP.RESULT[["champ.load"]] <- myLoad
-  }
-  
-  tmpbeta <- myLoad$beta
-  tmppd <- myLoad$pd
-  
-  ### Applying champ.impute() function.
-  if(runimpute)
-  {
-    message("\nRunning champ.impute()...")
-    myImpute <- champ.impute(beta=myLoad$beta,
-                             pd=myLoad$pd,
-                             method=imputemethod,
-                             k=5,
-                             ProbeCutoff=0.2,
-                             SampleCutoff=0.1)
-    if(saveStepresults)
-    {
-      save(myImpute,file=paste(resultsDir,"/myImpute.rda",sep=""))
-      message("champ.impute()'s result \"myImpute\" has been saved in ",resultsDir," as \"myImpute.rda.\"")
+
+    myLoad <- NULL
+    if (isTRUE(runload)) {
+        myfilter <- c(XY = "XY", DetP = "DetP", Beads = "Beads", NoCG = "NoCG",
+                      SNP = "SNP", MultiHit = "MultiHit") %in% filters
+        myLoad <- step("champ.load", champ.load(
+            directory = directory, method = "ChAMP", methValue = "B",
+            autoimpute = TRUE,
+            filterXY = myfilter[["XY"]], filterDetP = myfilter[["DetP"]],
+            ProbeCutoff = 0, SampleCutoff = 0.1, detPcut = 0.01,
+            filterBeads = myfilter[["Beads"]], beadCutoff = 0.05,
+            filterNoCG = myfilter[["NoCG"]], filterSNPs = myfilter[["SNP"]],
+            filterMultiHit = myfilter[["MultiHit"]], arraytype = at,
+            verbose = verbose))
+        if (inherits(myLoad, "champ_step_error")) {
+            .champ_stop("champ.load() failed; cannot continue the pipeline.")
+        }
+    } else {
+        if (!exists("myLoad", envir = parent.frame())) {
+            .champ_stop("runload = FALSE requires an existing 'myLoad' object.")
+        }
+        myLoad <- get("myLoad", envir = parent.frame())
     }
-    gc()
-    CHAMP.RESULT[["champ.impute"]] <- myImpute
-    message("Run champ.impute() Over!\n")
-  }
-  
-  tmppd <- myImpute$pd
-  
-  ### Applying champ.QC() function.
-  if(runQC)
-  {
-    message("\nRunning champ.QC()...")
-    myQCplots <- rep(FALSE,3)
-    names(myQCplots) <- c("mdsPlot","densityPlot","dendrogram")
-    myQCplots[QCplots] <- TRUE
-    
-    champ.QC(beta = tmpbeta,
-             pheno=tmppd$Sample_Group,
-             mdsPlot=myQCplots["mdsPlot"],
-             densityPlot=myQCplots["densityPlot"],
-             dendrogram=myQCplots["dendrogram"],
-             PDFplot=PDFplot,
-             Rplot=Rplot,
-             Feature.sel="None",
-             resultsDir=paste(resultsDir,"/CHAMP_QCimages/",sep=""))
-    
-    if(PDFplot)
-    {
-      message("Plots of champ.QC() has been saved in ",paste(resultsDir,"/CHAMP_QCimages/",sep=""))
+
+    tmppd <- myLoad$pd
+    tmpbeta <- myLoad$beta
+
+    myImpute <- NULL
+    if (isTRUE(runimpute)) {
+        myImpute <- step("champ.impute", champ.impute(
+            beta = tmpbeta, pd = tmppd, method = imputemethod, k = 5L,
+            ProbeCutoff = 0.2, SampleCutoff = 0.1, verbose = verbose))
+        if (!inherits(myImpute, "champ_step_error")) {
+            tmpbeta <- myImpute$beta
+            tmppd <- myImpute$pd
+        }
     }
-    gc()
-    message("Run champ.QC() Over!\n")
-  }
-  
-  
-  ### Applying champ.norm() function.
-  if(runnorm)
-  {
-    message("\nRunning champ.norm()...")
-    myNorm <- champ.norm(beta=tmpbeta,
-                         rgSet=myLoad$rgSet,
-                         mset=myLoad$mset,
-                         resultsDir=paste(resultsDir,"/CHAMP_Normalization/",sep=""),
-                         method=normalizationmethod,
-                         plotBMIQ=PDFplot,
-                         arraytype=arraytype,
-                         cores=cores)
-    if(saveStepresults)
-    {
-      save(myNorm,file=paste(resultsDir,"/myNorm.rda",sep=""))
-      message("champ.norm()'s result \"myNorm\" has been saved in ",resultsDir," as \"myNorm.rda.\"")
-      if(normalizationmethod=="BMIQ" & PDFplot==TRUE)
-        message("Plots of champ.norm() has been saved in ",paste(resultsDir,"/CHAMP_Normalization/",sep=""))
+
+    if (isTRUE(runQC)) {
+        myQC <- c(mdsPlot = "mdsPlot", densityPlot = "densityPlot",
+                  dendrogram = "dendrogram") %in% QCplots
+        step("champ.QC", champ.QC(
+            beta = tmpbeta, pheno = tmppd$Sample_Group,
+            mdsPlot = myQC[["mdsPlot"]], densityPlot = myQC[["densityPlot"]],
+            dendrogram = myQC[["dendrogram"]], PDFplot = PDFplot, Rplot = Rplot,
+            Feature.sel = "None",
+            resultsDir = file.path(resultsDir, "CHAMP_QCimages"), verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.norm"]] <- myNorm
-    message("Run champ.norm() Over!\n")
-  }
-  
-  ### Applying champ.SVD() function.
-  if(runSVD)
-  {
-    message("\nRunning champ.SVD()...")
-    champ.SVD(beta=myNorm,
-              rgSet=myLoad$rgSet,
-              pd=tmppd,
-              RGEffect=RGEffect,
-              PDFplot=PDFplot,
-              Rplot=Rplot,
-              resultsDir=paste(resultsDir,"/CHAMP_SVDimages/",sep=""))
-    
-    if(PDFplot)
-    {
-      message("Plots of champ.SVD() has been saved in ",paste(resultsDir,"/CHAMP_SVDimages/",sep=""))
+
+    myNorm <- NULL
+    if (isTRUE(runnorm)) {
+        myNorm <- step("champ.norm", champ.norm(
+            beta = tmpbeta, rgSet = myLoad$rgSet, mset = myLoad$mset,
+            resultsDir = file.path(resultsDir, "CHAMP_Normalization"),
+            method = normalizationmethod, plotBMIQ = PDFplot,
+            arraytype = at, cores = cores, verbose = verbose))
+        if (!inherits(myNorm, "champ_step_error")) tmpbeta <- myNorm
     }
-    gc()
-    message("Run champ.SVD() Over!\n")
-  }
-  
-  
-  ### Applying champ.runCombat() function.
-  if(runCombat)
-  {
-    message("\nRunning champ.runCombat()...")
-    myCombat <- champ.runCombat(beta=myNorm,
-                                pd=tmppd,
-                                batchname=batchname,
-                                logitTrans=TRUE)
-    
-    if(saveStepresults)
-    {
-      save(myCombat,file=paste(resultsDir,"/myCombat.rda",sep=""))
-      message("champ.runCombat()'s result \"myCombat\" has been saved in ",resultsDir," as \"myCombat.rda.\"")
+
+    if (isTRUE(runSVD)) {
+        step("champ.SVD", champ.SVD(
+            beta = tmpbeta, rgSet = myLoad$rgSet, pd = tmppd, RGEffect = RGEffect,
+            PDFplot = PDFplot, Rplot = Rplot,
+            resultsDir = file.path(resultsDir, "CHAMP_SVDimages"), verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.runCombat"]] <- myCombat
-    message("Run champ.runCombat() Over!\n")
-  }
-  
-  ### Applying champ.DMP() function.
-  if(runDMP)
-  {
-    message("\nRunning champ.DMP()...")
-    myDMP <- champ.DMP(beta = myNorm,
-                       pheno = tmppd$Sample_Group,
-                       adjPVal = adjPVal,
-                       adjust.method = "BH",
-                       compare.group = compare.group,
-                       arraytype = arraytype)
-    
-    if(saveStepresults)
-    {
-      save(myDMP,file=paste(resultsDir,"/myDMP.rda",sep=""))
-      message("champ.DMP()'s result \"myDMP\" has been saved in ",resultsDir," as \"myDMP.rda.\"")
+
+    if (isTRUE(runCombat)) {
+        if (!"Slide" %in% colnames(tmppd)) {
+            .champ_warn("No 'Slide' column in the sample sheet; ComBat is skipped.")
+        } else {
+            myCombat <- step("champ.runCombat", champ.runCombat(
+                beta = tmpbeta, pd = tmppd, batchname = batchname,
+                logitTrans = TRUE, verbose = verbose))
+            if (!inherits(myCombat, "champ_step_error")) tmpbeta <- myCombat
+        }
     }
-    gc()
-    CHAMP.RESULT[["champ.DMP"]] <- myDMP
-    message("Run champ.DMP() Over!\n")
-  }
-  
-  ### Applying champ.DMR() function.
-  if(runDMR)
-  {
-    message("\nRunning champ.DMR()...")
-    
-    myDMR <- champ.DMR(beta=myNorm,
-                       pheno=tmppd$Sample_Group,
-                       arraytype=arraytype,
-                       method = DMRmethod,
-                       minProbes=7,
-                       adjPvalDmr=adjPVal,
-                       ## following parameters are specifically for Bumphunter method.
-                       maxGap=300,
-                       cutoff=NULL,
-                       pickCutoff=TRUE,
-                       smooth=TRUE,
-                       smoothFunction=loessByCluster,
-                       useWeights=FALSE,
-                       permutations=NULL,
-                       B=250,
-                       nullMethod="bootstrap",
-                       cores=cores,
-                       ## following parameters are specifically for probe ProbeLasso method.
-                       meanLassoRadius=375,
-                       minDmrSep=1000,
-                       minDmrSize=50,
-                       adjPvalProbe=adjPVal,
-                       Rplot=Rplot,
-                       PDFplot=PDFplot,
-                       resultsDir=paste(resultsDir,"/CHAMP_ProbeLasso/",sep=""),
-                       ## following parameters are specifically for DMRcate method.
-                       rmSNPCH=T,
-                       dist=2,
-                       mafcut=0.05)
-    
-    if(saveStepresults)
-    {
-      save(myDMR,file=paste(resultsDir,"/myDMR.rda",sep=""))
-      message("champ.DMR()'s result \"myDMR\" has been saved in ",resultsDir," as \"myDMR.rda.\"")
-      if(DMRmethod=="ProbeLasso" & PDFplot==TRUE)
-        message("Plots of champ.DMR() have been saved in ",paste(resultsDir,"/CHAMP_ProbeLasso/",sep=""))
+
+    myDMP <- NULL
+    if (isTRUE(runDMP)) {
+        myDMP <- step("champ.DMP", champ.DMP(
+            beta = tmpbeta, pheno = tmppd$Sample_Group, adjPVal = adjPVal,
+            adjust.method = "BH", compare.group = compare.group,
+            arraytype = at, verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.DMR"]] <- myDMR
-    message("Run champ.DMR() Over!\n")
-  }
-  
-  ### Applying champ.Block() function.
-  if(runBlock)
-  {
-    message("\nRunning champ.Block()...")
-    myBlock <- champ.Block(beta=myNorm,
-                           pheno=tmppd$Sample_Group,
-                           arraytype=arraytype,
-                           maxClusterGap=250000,
-                           B=500,
-                           bpSpan=250000,
-                           minNum=10,
-                           cores=cores)
-    
-    
-    if(saveStepresults)
-    {
-      save(myBlock,file=paste(resultsDir,"/myBlock.rda",sep=""))
-      message("champ.Block()'s result \"myBlock\" has been saved in ",resultsDir," as \"myBlock.rda.\"")
+
+    myDMR <- NULL
+    if (isTRUE(runDMR)) {
+        myDMR <- step("champ.DMR", champ.DMR(
+            beta = tmpbeta, pheno = tmppd$Sample_Group, compare.group = compare.group,
+            arraytype = at, method = DMRmethod, minProbes = 7L,
+            adjPvalDmr = adjPVal, cores = cores, maxGap = 300, cutoff = NULL,
+            pickCutoff = TRUE, smooth = TRUE, useWeights = FALSE,
+            permutations = NULL, B = 250L, nullMethod = "bootstrap",
+            meanLassoRadius = 375, minDmrSep = 1000, minDmrSize = 50,
+            adjPvalProbe = adjPVal, Rplot = Rplot, PDFplot = PDFplot,
+            resultsDir = file.path(resultsDir, "CHAMP_ProbeLasso"),
+            rmSNPCH = TRUE, dist = 2, mafcut = 0.05, verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.Block"]] <- myBlock
-    message("Run champ.Block() Over!\n")
-  }
-  
-  ### Applying champ.GSEA() function.
-  if(runGSEA)
-  {
-    message("\nRunning champ.GSEA()...")
-    myGSEA <- champ.GSEA(beta=myNorm,
-                         DMP=myDMP,
-                         DMR=myDMR,
-                         CpGlist=NULL,
-                         Genelist=NULL,
-                         arraytype=arraytype,
-                         adjPval=adjPVal)
-    
-    if(saveStepresults)
-    {
-      save(myGSEA,file=paste(resultsDir,"/myGSEA.rda",sep=""))
-      message("champ.GSEA()'s result \"myGSEA\" has been saved in ",resultsDir," as \"myGSEA.rda.\"")
+
+    myBlock <- NULL
+    if (isTRUE(runBlock)) {
+        myBlock <- step("champ.Block", champ.Block(
+            beta = tmpbeta, pheno = tmppd$Sample_Group, arraytype = at,
+            maxClusterGap = 250000, B = 500L, bpSpan = 250000, minNum = 10L,
+            cores = cores, verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.GSEA"]] <- myGSEA
-    message("Run champ.GSEA() Over!\n")
-  }
-  
-  ### Applying champ.EpiMod() function.
-  if(runEpiMod)
-  {
-    message("\nRunning champ.EpiMod()...")
-    
-    myEpiMod <- champ.EpiMod(beta=myNorm,
-                             pheno=tmppd$Sample_Group,
-                             nseeds=100,
-                             gamma=0.5,
-                             nMC=1000,
-                             sizeR.v=c(1,100),
-                             minsizeOUT=10,
-                             resultsDir=paste(resultsDir,"/CHAMP_EpiMod/",sep=""),
-                             PDFplot=PDFplot,
-                             arraytype=arraytype)
-    
-    
-    if(saveStepresults)
-    {
-      save(myEpiMod,file=paste(resultsDir,"/myEpiMod.rda",sep=""))
-      message("champ.EpiMod()'s result \"myEpiMod\" has been saved in ",resultsDir," as \"myEpiMod.rda.\"")
-      if(PDFplot==TRUE)
-        message("Plots of champ.EpiMod() have been saved in ",paste(resultsDir,"/CHAMP_EpiMod/",sep=""))
+
+    if (isTRUE(runGSEA)) {
+        step("champ.GSEA", champ.GSEA(
+            beta = tmpbeta,
+            DMP = if (inherits(myDMP, "champ_step_error")) NULL else myDMP,
+            DMR = if (inherits(myDMR, "champ_step_error")) NULL else myDMR,
+            CpGlist = NULL, Genelist = NULL, arraytype = at, adjPval = adjPVal,
+            verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.EpiMod"]] <- myEpiMod
-    message("Run champ.EpiMod() Over!\n")
-  }
-  
-  ### Applying champ.CNA() function.
-  if(runCNA)
-  {
-    message("\nRunning champ.CNA()...")
-    
-    myCNA <- champ.CNA(intensity=myLoad$intensity,
-                       pheno=myLoad$pd$Sample_Group,
-                       resultsDir="./CHAMP_CNA",
-                       control=TRUE,
-                       controlGroup="champCtls",
-                       sampleCNA=TRUE,
-                       groupFreqPlots=TRUE,
-                       Rplot=Rplot,
-                       PDFplot=PDFplot,
-                       freqThreshold=0.3,
-                       arraytype=arraytype)
-    
-    
-    if(saveStepresults)
-    {
-      save(myCNA,file=paste(resultsDir,"/myCNA.rda",sep=""))
-      message("champ.CNA()'s result \"myCNA\" has been saved in ",resultsDir," as \"myCNA.rda.\"")
+
+    if (isTRUE(runEpiMod)) {
+        step("champ.ebGSEA", champ.ebGSEA(
+            beta = tmpbeta, pheno = tmppd$Sample_Group, adjPval = adjPVal,
+            arraytype = at, cores = 1L, verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.CNA"]] <- myCNA
-    message("Run champ.CNA() Over!\n")
-  }
-  
-  if(runRefBase)
-  {
-    message("\nRunning champ.refbase()...")
-    myRefbase <- champ.refbase(beta=myNorm,
-                               arraytype=arraytype)
-    
-    if(saveStepresults)
-    {
-      save(myRefbase,file=paste(resultsDir,"/myRefbase.rda",sep=""))
-      message("champ.refbase()'s result \"myRefbase\" has been saved in ",resultsDir," as \"myRefbase.rda.\"")
+
+    if (isTRUE(runCNA)) {
+        step("champ.CNA", champ.CNA(
+            intensity = myLoad$intensity, pheno = myLoad$pd$Sample_Group,
+            resultsDir = file.path(resultsDir, "CHAMP_CNA"), control = control,
+            controlGroup = controlGroup, sampleCNA = TRUE, groupFreqPlots = TRUE,
+            Rplot = Rplot, PDFplot = PDFplot, freqThreshold = 0.3,
+            arraytype = at, verbose = verbose))
     }
-    gc()
-    CHAMP.RESULT[["champ.refbase"]] <- myRefbase
-    message("Run champ.refbase() Over!\n")
-  }
-  
-  message("[<<<< ChAMP.PROCESS END >>>>]")
-  message("[===========================]")
-  return(CHAMP.RESULT)
+
+    if (isTRUE(runRefBase)) {
+        step("champ.refbase", champ.refbase(beta = tmpbeta, arraytype = at,
+                                            verbose = verbose))
+    }
+
+    .champ_msg("[<<<< ChAMP.PROCESS END >>>>]")
+    .champ_msg("[===========================]")
+    RESULT
 }

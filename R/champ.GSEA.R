@@ -1,258 +1,248 @@
-if(getRversion() >= "3.1.0") utils::globalVariables(c("myDMP","myDMR","myNorm","PathwayList"))
+# =============================================================================
+#  champ.GSEA -- gene set enrichment analysis
+# =============================================================================
 
-champ.GSEA <- function(beta=myNorm,
-                       DMP=myDMP[[1]],
-                       DMR=myDMR,
-                       CpGlist=NULL,
-                       Genelist=NULL,
-                       pheno=myLoad$pd$Sample_Group,
-                       method="fisher",
-                       arraytype="450K",
-                       Rplot=TRUE,
-                       adjPval=0.05,
-                       cores=1)
-{
-  message("[===========================]")
-  message("[<<<< ChAMP.GSEA START >>>>>]")
-  message("-----------------------------")
-  
-  ##### Defind a inter function #####
-  PasteVector <- function(v){
-    vt <- v[1];
-    if(length(v) > 1){
-      for(g in 2:length(v)){
-        vt <- paste(vt,v[g],sep=" ")
-      }
-    }
-    vt <- paste(vt," EnD",sep="");
-    out.v <- sub(" EnD","",vt);
-    out.v <- sub("NA , ","",out.v);
-    out.v <- sub(" , NA","",out.v);
-    out.v <- sub(" , NA , "," , ",out.v);
-    return(out.v);
-  }
-  
-  
-  if(method=="fisher")
-  {
-    data(PathwayList)
-    # if(arraytype=="EPIC"){
-    #   RSobject <- RatioSet(beta, annotation = c(array = "IlluminaHumanMethylationEPIC",annotation = "ilm10b4.hg19"))
-    # }else{
-    #   RSobject <- RatioSet(beta, annotation = c(array = "IlluminaHumanMethylation450k",annotation = "ilmn12.hg19"))
-    # }
-    # RSanno <- getAnnotation(RSobject)[,c("chr","pos","Name","UCSC_RefGene_Name")]
-    
-    if(arraytype %in% c("EPIC", "EPICv2")) {
-      data("probe.features.epicv2")
-    } else if(arraytype == "EPICv1") {
-      data("probe.features.epicv1")
-    } else if(arraytype == "450K") { 
-      data("probe.features")
-    } else (
-      stop("arraytype must be `EPICv2`, `EPICv1`, `450K`")
-    )
-    RSanno <- probe.features[rownames(beta), c("CHR", "MAPINFO", "gene")]
+#' Collapse a vector of gene symbols into one string
+#' @keywords internal
+.champ_paste_vector <- function(v) {
+    v <- v[!is.na(v) & nzchar(v)]
+    if (!length(v)) return("")
+    paste(unique(v), collapse = " ")
+}
+
+#' Gene set enrichment analysis
+#'
+#' Four methods are supported:
+#' \describe{
+#'   \item{fisher}{Fisher's exact test on MSigDB-like gene sets, weighted by
+#'     the number of CpGs per gene (fast, no extra packages).}
+#'   \item{goseq}{goseq, which models the CpG-count bias explicitly.}
+#'   \item{gometh}{missMethyl::gometh for GO enrichment of CpG lists.}
+#'   \item{ebayes}{champ.ebGSEA(), a global-test based enrichment analysis.}
+#' }
+#'
+#' @param beta beta value matrix (used for annotation and, for "ebayes", the
+#'   test itself).
+#' @param DMP a champ.DMP() result (single data.frame) or NULL.
+#' @param DMR a champ.DMR() result or NULL.
+#' @param CpGlist character vector or named list of CpG identifiers.
+#' @param Genelist character vector or named list of gene symbols.
+#' @param pheno phenotype vector (required for method "ebayes").
+#' @param method "fisher", "goseq", "gometh" or "ebayes".
+#' @param arraytype "450K", "EPICv1" or "EPICv2".
+#' @param Rplot draw diagnostic plots.
+#' @param adjPval adjusted p-value cutoff.
+#' @param cores number of workers for the "ebayes" method.
+#' @param verbose print progress.
+#'
+#' @return named list of enrichment tables.
+#' @export
+champ.GSEA <- function(beta = NULL, DMP = NULL, DMR = NULL, CpGlist = NULL,
+                       Genelist = NULL, pheno = NULL, method = "fisher",
+                       arraytype = "450K", Rplot = FALSE, adjPval = 0.05,
+                       cores = 1L, verbose = TRUE) {
+    .champ_msg("[===========================]")
+    .champ_msg("[<<<< ChAMP.GSEA START >>>>>]")
+    .champ_msg("-----------------------------")
+    beta <- .champ_as_beta(beta)
+    at <- .champ_arraytype(arraytype)
+    method <- match.arg(method, c("fisher", "goseq", "gometh", "ebayes"))
+    pf <- .champ_probe_features(at)
+    RSanno <- pf[rownames(beta), c("CHR", "MAPINFO", "gene"), drop = FALSE]
     colnames(RSanno) <- c("chr", "pos", "UCSC_RefGene_Name")
-    
+    RSanno$UCSC_RefGene_Name[is.na(RSanno$UCSC_RefGene_Name)] <- ""
 
-    ueid.v <- unique(unlist(sapply(RSanno$UCSC_RefGene_Name,function(x) strsplit(x,split=";")[[1]])))
-    bias.Data <- table(unlist(sapply(RSanno$UCSC_RefGene_Name,function(x) unique(strsplit(x,split=";")[[1]]))))
+    .champ_require("stats", "champ.GSEA()")
+    if (identical(method, "ebayes")) {
+        if (is.null(pheno)) .champ_stop("'pheno' is required for method = 'ebayes'.")
+        out <- champ.ebGSEA(beta = beta, pheno = pheno, adjPval = adjPval,
+                            arraytype = at, cores = cores, verbose = verbose)
+        .champ_msg("[<<<<< ChAMP.GSEA END >>>>>>]")
+        return(out)
+    }
+
+    if (identical(method, "gometh")) {
+        .champ_require("missMethyl", "method = 'gometh'")
+        genes <- NULL
+        loi.lv <- list()
+        if (!is.null(DMP)) {
+            DMP <- if (is.list(DMP) && !is.data.frame(DMP)) DMP[[1L]] else DMP
+            loi.lv[["DMP"]] <- rownames(DMP)
+        }
+        if (!is.null(DMR)) {
+            dmr <- if (is.data.frame(DMR)) DMR else DMR[[1L]]
+            loi.lv[["DMR"]] <- .champ_cpgs_in_regions(dmr, RSanno)
+        }
+        if (!is.null(CpGlist)) loi.lv[["CpG"]] <- as.character(CpGlist)
+        if (!is.null(Genelist)) {
+            .champ_msg("gometh() only accepts CpGs; 'Genelist' is ignored. Use method = 'fisher'.")
+        }
+        if (!length(loi.lv)) .champ_stop("Nothing to test: supply DMP, DMR or CpGlist.")
+        out <- list()
+        for (nm in names(loi.lv)) {
+            .champ_msg("  gometh on ", nm, " (", length(loi.lv[[nm]]), " CpGs)")
+            tab <- .champ_try(missMethyl::gometh(
+                sig.cpg = loi.lv[[nm]], all.cpg = rownames(beta),
+                collection = c("GO"), array.type = at, plot.bias = Rplot,
+                prior.prob = TRUE), default = NULL)
+            if (is.null(tab)) {
+                .champ_warn("gometh failed for ", nm, "; skipping.")
+                next
+            }
+            tab <- tab[tab$FDR <= adjPval, , drop = FALSE]
+            out[[nm]] <- tab[order(tab$FDR), , drop = FALSE]
+        }
+        .champ_msg("[<<<<< ChAMP.GSEA END >>>>>>]")
+        return(out)
+    }
+
+    PathwayList <- .champ_pathway_list()
+    ueid.v <- unique(unlist(strsplit(RSanno$UCSC_RefGene_Name, ";", fixed = TRUE),
+                            use.names = FALSE))
+    ueid.v <- ueid.v[nzchar(ueid.v) & !is.na(ueid.v)]
+    bias.Data <- table(unlist(strsplit(RSanno$UCSC_RefGene_Name, ";", fixed = TRUE),
+                              use.names = FALSE))
     bias.Data <- as.numeric(bias.Data[ueid.v])
-    
+
     loi.lv <- list()
-    if(!is.null(DMP))
-    {
-      cpg.idx <- rownames(DMP)[which(DMP$adj.P.Val <= adjPval)]
-      loi.lv[["DMP"]] <- unique(unlist(sapply(RSanno[cpg.idx,"UCSC_RefGene_Name"],function(x) strsplit(x,split=";")[[1]])))
+    if (!is.null(DMP)) {
+        DMP <- if (is.list(DMP) && !is.data.frame(DMP)) DMP[[1L]] else DMP
+        cpg.idx <- rownames(DMP)[DMP$adj.P.Val <= adjPval]
+        loi.lv[["DMP"]] <- .champ_genes_of_cpgs(cpg.idx, RSanno)
     }
-    if(!is.null(DMR))
-    {
-      #DMR[[1]]$seqnames <- as.character(DMR[[1]]$seqnames)
-      cpg.idx <- unique(unlist(apply(DMR[[1]],1,function(x) rownames(RSanno)[which(RSanno$chr==x[1] & RSanno$pos >= as.numeric(x[2]) & RSanno$pos <= as.numeric(x[3]))])))
-      loi.lv[["DMR"]] <- unique(unlist(sapply(RSanno[cpg.idx,"UCSC_RefGene_Name"],function(x) strsplit(x,split=";")[[1]])))
+    if (!is.null(DMR)) {
+        dmr <- if (is.data.frame(DMR)) DMR else DMR[[1L]]
+        loi.lv[["DMR"]] <- .champ_genes_of_cpgs(.champ_cpgs_in_regions(dmr, RSanno), RSanno)
     }
-    if(!is.null(CpGlist))
-    {
-      if(class(CpGlist)=="character")
-      {
-        loi.lv[["CpG"]] <- unique(unlist(sapply(RSanno[CpGlist,"UCSC_RefGene_Name"],function(x) strsplit(x,split=";")[[1]])))
-      }else if(class(CpGlist)=="list")
-      {
-        if(names(CpGlist) %in% c("DMP","DMR","CpG","Gene")) stop("Your CpG list can not contain names as follows: \"DMP\",\"DMR\",\"CpG\",\"Gene\".")
-        if(names(CpGlist)==NULL | sum(is.na(names(CpGlist)))!=0) stop("Please specify your CpG list names.")
-        cpg.tmp <- lapply(CpGlist,function(x) unique(unlist(sapply(RSanno[x,"UCSC_RefGene_Name"],function(x) strsplit(x,split=";")[[1]]))))
-        loi.lv <- c(loi.lv,cpg.tmp)
-      }else
-      {
-        stop("CpGlist Format is not correct, it must be character vector or character list.")
-      }
+    if (!is.null(CpGlist)) {
+        if (is.character(CpGlist)) {
+            loi.lv[["CpG"]] <- .champ_genes_of_cpgs(CpGlist, RSanno)
+        } else if (is.list(CpGlist)) {
+            if (is.null(names(CpGlist)) || any(is.na(names(CpGlist)))) {
+                .champ_stop("Please name every element of 'CpGlist'.")
+            }
+            bad <- intersect(names(CpGlist), c("DMP", "DMR", "CpG", "Gene"))
+            if (length(bad)) .champ_stop("'CpGlist' must not contain names: ", paste(bad, collapse = ", "))
+            loi.lv <- c(loi.lv, lapply(CpGlist, function(x) .champ_genes_of_cpgs(as.character(x), RSanno)))
+        } else {
+            .champ_stop("'CpGlist' must be a character vector or a named list.")
+        }
     }
-    if(!is.null(Genelist))
-    {
-      if(class(Genelist)=="character")
-      {
-        loi.lv[["Gene"]] <- Genelist
-      }else if(class(Genelist)=="list")
-      {
-        if(names(Genelist) %in% c("DMP","DMR","CpG","Gene")) stop("Your Gene list can not contain names as follows: \"DMP\",\"DMR\",\"CpG\",\"Gene\".")
-        if(names(Genelist)==NULL | sum(is.na(names(Genelist)))!=0) stop("Please specify your Gene list names.")
-        loi.lv <- c(loi.lv,Genelist)
-      }else
-      {
-        stop("Genelist Format is not correct, it must be character vector or character list.")
-      }
+    if (!is.null(Genelist)) {
+        if (is.character(Genelist)) {
+            loi.lv[["Gene"]] <- Genelist
+        } else if (is.list(Genelist)) {
+            if (is.null(names(Genelist)) || any(is.na(names(Genelist)))) {
+                .champ_stop("Please name every element of 'Genelist'.")
+            }
+            bad <- intersect(names(Genelist), c("DMP", "DMR", "CpG", "Gene"))
+            if (length(bad)) .champ_stop("'Genelist' must not contain names: ", paste(bad, collapse = ", "))
+            loi.lv <- c(loi.lv, Genelist)
+        } else {
+            .champ_stop("'Genelist' must be a character vector or a named list.")
+        }
     }
-    message("<< Prepare Gene List Ready  >>")
-    
-    ######################  Do GSEA   ###########################
-    
-    selGEID.lv <- loi.lv;
-    
-    ### How many of the MSigDB list genes are on array?
-    listnames.v <- names(PathwayList);
-    nrepGEID.m <- matrix(nrow=length(listnames.v),ncol=3);
-    rownames(nrepGEID.m) <- listnames.v;
-    colnames(nrepGEID.m) <- c("nList","nRep","fRep");
-    
-    nrepGEID.m[,"nList"] <- unlist(lapply(PathwayList,function(x) length(x)))
-    nrepGEID.m[,"nRep"] <- unlist(lapply(PathwayList,function(x) length(intersect(x,ueid.v))))
-    nrepGEID.m[,"fRep"] <- nrepGEID.m[,"nRep"]/nrepGEID.m[,"nList"]
-    
-    
-    ### Do enrichment analysis
-    listsummary.lm <- list();
-    
-    message("<< Start Do GSEA on each Gene List  >>")
-    
-    for(i in 1:length(selGEID.lv))
-    {
-      message("<< Do GSEA on Gene list ",names(loi.lv)[i],">>")
-      listPV.v <- vector();
-      listOR.v <- vector();
-      fisher.lm <- list();
-      novlap.v <- vector();
-      ovlapG.lv <- list();
-      
-      selEID.v <- selGEID.lv[[i]];
-      
-      # Blow is pale fisher exact test method.
-      # ==================
-      if(method == "fisher")
-      {
-        message("<< Pale Fisher Exact Test will be used to do GSEA >>")
-        message(" << The category information is downloaded from MsigDB, and only simple Fisher Exact Test will be used to calculate GSEA. This method is suitable if your genes has equalivalent probability to be enriched. If you are using CpGs mapping genes, gometh method is recommended.>> ")
-        InMSigDBlist_InList <- unlist(lapply(PathwayList,function(x) length(intersect(x,selEID.v))))
-        NotInMSigDBlist_InList <- length(selEID.v)-InMSigDBlist_InList
-        InMSigDBlist_NotInList <- unlist(lapply(PathwayList,function(x) length(intersect(x,ueid.v))-length(intersect(x,selEID.v)))) 
-        NotInMSigDBlist_NotInList <- length(ueid.v)-InMSigDBlist_InList-NotInMSigDBlist_InList-InMSigDBlist_NotInList 
-        
-        ovlapG.lv_2 <- lapply(PathwayList,function(x) intersect(x,selEID.v))
-        fisher.lm_2 <- cbind(InMSigDBlist_InList,NotInMSigDBlist_InList,InMSigDBlist_NotInList,NotInMSigDBlist_NotInList) 
-        listPV.v_2 <- t(apply(fisher.lm_2,1,function(x) unlist(fisher.test(matrix(x,2,2),alternative="greater")[c(1,3)])))
-        info <- cbind(fisher.lm_2,listPV.v_2)
-        
-        selL.idx <- which(nrepGEID.m[,3]>0.6); ### remove lists with less than 60% representation on array
-        listsummary.m_2 <- data.frame("Gene_List"=listnames.v[selL.idx],
-                                      nrepGEID.m[selL.idx,],
-                                      "nOVLAP"=fisher.lm_2[,1][selL.idx],
-                                      "OR"=listPV.v_2[selL.idx,2],
-                                      "P-value"=listPV.v_2[selL.idx,1],
-                                      "adjPval"=p.adjust(listPV.v_2[selL.idx,1],method="BH"),
-                                      "Genes"=unlist(lapply(ovlapG.lv_2[selL.idx],function(x) PasteVector(x))))
-        listsummary.m_2 <- listsummary.m_2[order(listsummary.m_2$adjPval),]
-        pvals <- listsummary.m_2[which(listsummary.m_2$adjPval <= adjPval),]
-      }else if(method == "goseq")
-      {
-        message("goseq method will be used to do GSEA")
-        message("This method is supported by goseq package, which is developed to address inequalivalent issue between number of CpGs and genes.")
-        # Below is goseq method
-        # goseq method is incoperated here because not all genes contain same length of CpGs.
-        # goseq would generated a probability weight function between significant genes and 
-        # number of CpGs contained by each genes, one plot will be plotted on that.
-        # Then goseq function would use corrected gene list to do GSEA.
-        # ===================
-        DE.genes <- as.integer(ueid.v %in% selEID.v)
-        names(DE.genes) <- ueid.v
-        pwf <- nullp(DE.genes,"hg19","geneSymbol",bias.data=bias.Data,plot.fit=Rplot)
-        pvals <- goseq(pwf,'hg19','geneSymbol')
-        over_represented_adjPvalue <- p.adjust(pvals$over_represented_pvalue,method="BH")
-        pvals <- cbind(pvals,over_represented_adjPvalue)
-      }
-      listsummary.lm[[i]] <- pvals;
-      message("<< Done for Gene list ",names(selGEID.lv)[i]," >>");
-    }
-    names(listsummary.lm) <- names(selGEID.lv);
-  } else if(method=="gometh")
-  {
-    # if(arraytype=="EPIC"){
-    #   RSobject <- RatioSet(beta, annotation = c(array = "IlluminaHumanMethylationEPIC",annotation = "ilm10b4.hg19"))
-    # }else{
-    #   RSobject <- RatioSet(beta, annotation = c(array = "IlluminaHumanMethylation450k",annotation = "ilmn12.hg19"))
-    # }
-    # 
-    # RSanno <- getAnnotation(RSobject)[,c("chr","pos","Name","UCSC_RefGene_Name")]
-    
-    if(arraytype %in% c("EPIC", "EPICv2")) {
-      data("probe.features.epicv2")
-    } else if(arraytype == "EPICv1") {
-      data("probe.features.epicv1")
-    } else if(arraytype == "450K") { 
-      data("probe.features")
-    } else (
-      stop("arraytype must be `EPICv2`, `EPICv1`, `450K`")
-    )
-    RSanno <- probe.features[rownames(beta), c("CHR", "MAPINFO", "gene")]
-    colnames(RSanno) <- c("chr", "pos", "UCSC_RefGene_Name")
-    
-    ueid.v <- rownames(beta)
-    loi.lv <- list()
-    if(!is.null(DMP))
-    {
-      cpg.idx <- rownames(DMP)
-      loi.lv[["DMP"]] <- cpg.idx
-    }
-    if(!is.null(DMR))
-    {
-      cpg.idx <- unique(unlist(apply(DMR[[1]],1,function(x) rownames(RSanno)[which(RSanno$chr==x[1] & RSanno$pos >= as.numeric(x[2]) & RSanno$pos <= as.numeric(x[3]))])))
-      loi.lv[["DMR"]] <- cpg.idx
-    }
-    if(!is.null(CpGlist))
-    {   
-      loi.lv[["CpG"]] <- CpGlist
-    }
-    if(!is.null(Genelist))
-    {
-      message("gometh function only take CpGs to calculate GSEA, so your Gene List can not be used in this function. Please use \"fisher\"method.")
-    }
-    
-    message("<< Prepare CpG List Ready  >>")
+    if (!length(loi.lv)) .champ_stop("Nothing to test: supply DMP, DMR, CpGlist or Genelist.")
+    .champ_msg("<< Gene lists ready: ", paste(names(loi.lv), collapse = ", "), " >>")
+
+    nrepGEID.m <- matrix(NA_real_, nrow = length(PathwayList), ncol = 3L,
+                         dimnames = list(names(PathwayList),
+                                         c("nList", "nRep", "fRep")))
+    nrepGEID.m[, "nList"] <- vapply(PathwayList, length, integer(1L))
+    nrepGEID.m[, "nRep"] <- vapply(PathwayList, function(x) length(intersect(x, ueid.v)), integer(1L))
+    nrepGEID.m[, "fRep"] <- nrepGEID.m[, "nRep"] / nrepGEID.m[, "nList"]
+
     listsummary.lm <- list()
-    for(i in names(loi.lv))
-    {
-      message("  Calculating GSEA with gometh method on ",i," CpG list")
-      message("  Note that gometh method would count numbers of CpGs in each genes and correct this bias.")
-      tmp <- gometh(loi.lv[[i]], all.cpg=ueid.v, collection=c("GO"), array.type = arraytype, plot.bias=Rplot, prior.prob=TRUE)
-      A <- tmp[tmp$FDR <= adjPval,]
-      listsummary.lm[[i]] <- A[order(A$FDR),]
+    for (i in seq_along(loi.lv)) {
+        nm <- names(loi.lv)[i]
+        .champ_msg("<< Do GSEA on gene list ", nm, " >>")
+        selEID.v <- unique(loi.lv[[nm]])
+        selEID.v <- selEID.v[!is.na(selEID.v)]
+        if (identical(method, "goseq")) {
+            .champ_require("goseq", "method = 'goseq'")
+            .champ_require("geneLenDataBase", "method = 'goseq'")
+            DE.genes <- as.integer(ueid.v %in% selEID.v)
+            names(DE.genes) <- ueid.v
+            pwf <- .champ_try(goseq::nullp(DE.genes, "hg19", "geneSymbol",
+                                            bias.data = bias.Data, plot.fit = Rplot),
+                              default = NULL)
+            if (is.null(pwf)) {
+                .champ_warn("goseq::nullp() failed for ", nm, "; skipping.")
+                next
+            }
+            pvals <- .champ_try(goseq::goseq(pwf, "hg19", "geneSymbol"), default = NULL)
+            if (is.null(pvals)) {
+                .champ_warn("goseq() failed for ", nm, "; skipping.")
+                next
+            }
+            pvals$over_represented_adjPvalue <- stats::p.adjust(pvals$over_represented_pvalue,
+                                                                method = "BH")
+            listsummary.lm[[nm]] <- pvals[pvals$over_represented_adjPvalue <= adjPval, ,
+                                          drop = FALSE]
+            next
+        }
+
+        .champ_msg("  Fisher's exact test (MSigDB gene sets)")
+        InMSigDBlist_InList <- vapply(PathwayList, function(x) length(intersect(x, selEID.v)), integer(1L))
+        NotInMSigDBlist_InList <- length(selEID.v) - InMSigDBlist_InList
+        InMSigDBlist_NotInList <- vapply(PathwayList, function(x)
+            length(intersect(x, ueid.v)) - length(intersect(x, selEID.v)), integer(1L))
+        NotInMSigDBlist_NotInList <- length(ueid.v) - InMSigDBlist_InList -
+            NotInMSigDBlist_InList - InMSigDBlist_NotInList
+        ovlapG.lv <- lapply(PathwayList, function(x) intersect(x, selEID.v))
+        fisher.m <- cbind(InMSigDBlist_InList, NotInMSigDBlist_InList,
+                          InMSigDBlist_NotInList, NotInMSigDBlist_NotInList)
+        pv.m <- t(apply(fisher.m, 1L, function(x) {
+            ft <- .champ_try(stats::fisher.test(matrix(x, 2L, 2L), alternative = "greater"),
+                             default = NULL)
+            if (is.null(ft)) c(NA_real_, NA_real_) else c(ft$p.value, unname(ft$estimate))
+        }))
+        selL.idx <- which(nrepGEID.m[, "fRep"] > 0.6)
+        if (!length(selL.idx)) {
+            .champ_stop("No gene set covers more than 60% of the array genes. ",
+                        "This happens when 'beta' only contains a small subset of the array ",
+                        "(use the full matrix) or when the annotation has no gene symbols.")
+        }
+        out <- data.frame(
+            Gene_List = rownames(nrepGEID.m)[selL.idx],
+            nrepGEID.m[selL.idx, , drop = FALSE],
+            nOVLAP = fisher.m[selL.idx, 1L],
+            OR = pv.m[selL.idx, 2L],
+            P.value = pv.m[selL.idx, 1L],
+            adjPval = stats::p.adjust(pv.m[selL.idx, 1L], method = "BH"),
+            Genes = vapply(ovlapG.lv[selL.idx], .champ_paste_vector, character(1L)),
+            check.names = FALSE, stringsAsFactors = FALSE)
+        out <- out[order(out$adjPval), , drop = FALSE]
+        listsummary.lm[[nm]] <- out[out$adjPval <= adjPval, , drop = FALSE]
     }
-  } else if (method=="ebayes") {
-    message("<< ebayes GSEA method  >>")
-    message("ebayes GSEA method would do GSEA based on global test on all CpG sites, thus you don't need to provide any DMP or DMR here, but instead, please assign pheno parameter.")
-    if(is.null(pheno)) stop("Pheno parameter is required for ebayes GSEA method.")
-    
-    if(class(pheno)=="numeric") {
-      message("  pheno parameter is continues variable, linear method would be used when calculating ebayes GSEA.")
-    } else if (class(pheno) %in% c("character","factor")) {
-      if(length(table(pheno) == 2)) message("  pheno parameter is category variable, logistic method would be ued when calculating ebayes GSEA.")
-      else stop("If your pheno parameter is category variable, only two phenotypes are allowed, say Cancer vs Normal, please modify your data set.")
+    .champ_msg("[<<<<< ChAMP.GSEA END >>>>>>]")
+    .champ_msg("[===========================]")
+    listsummary.lm
+}
+
+#' Genes of a set of CpGs
+#' @keywords internal
+.champ_genes_of_cpgs <- function(cpgs, RSanno) {
+    cpgs <- intersect(as.character(cpgs), rownames(RSanno))
+    if (!length(cpgs)) return(character(0))
+    g <- unlist(strsplit(RSanno[cpgs, "UCSC_RefGene_Name"], ";", fixed = TRUE),
+                use.names = FALSE)
+    unique(g[nzchar(g) & !is.na(g)])
+}
+
+#' CpGs overlapping a DMR table
+#' @keywords internal
+.champ_cpgs_in_regions <- function(dmr, RSanno) {
+    if (is.null(dmr) || !nrow(dmr)) return(character(0))
+    if (!all(c("seqnames", "start", "end") %in% colnames(dmr))) {
+        .champ_stop("The DMR table must contain seqnames, start and end columns.")
     }
-    listsummary.lm <- champ.ebGSEA(beta=beta,pheno=pheno,adjPval=adjPval,minN=5,arraytype=arraytype, cores=cores)
-  } else {
-    stop(" You must assign method parameter as fisher, gometh or ebayes.")
-  }
-  
-  message("[<<<<< ChAMP.GSEA END >>>>>>]")
-  message("[===========================]")
-  return(listsummary.lm)
-} 
+    out <- character(0)
+    for (i in seq_len(nrow(dmr))) {
+        sel <- RSanno$chr == sub("^chr", "", as.character(dmr$seqnames[i])) &
+            RSanno$pos >= as.numeric(dmr$start[i]) &
+            RSanno$pos <= as.numeric(dmr$end[i])
+        out <- c(out, rownames(RSanno)[which(sel)])
+    }
+    unique(out)
+}
