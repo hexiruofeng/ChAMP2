@@ -129,8 +129,9 @@ to force the bundled implementation.
   `champ.SVD` failing on integer matrices, `champ.CNA` failing without control probes.
 * **Parallelism** uses the base `parallel` package, so `cores` works on Windows too.
 
-See [NEWS.md](NEWS.md) for the full list and [COMPATIBILITY.md](COMPATIBILITY.md) for the
-design notes.
+See [NEWS.md](NEWS.md) for the full list, [COMPATIBILITY.md](COMPATIBILITY.md) for the
+design notes, and [inst/INSTALL-zh.md](inst/INSTALL-zh.md) for a Chinese
+installation guide.
 
 ---
 

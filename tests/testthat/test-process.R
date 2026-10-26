@@ -28,10 +28,13 @@ test_that("champ.process reports a failing step instead of aborting", {
                                    stringsAsFactors = FALSE))
     ## runBlock needs exactly two groups and enough probes; force a failure by
     ## asking for DMRs with minProbes larger than the data
+    ## an invalid DMR method makes the step fail deterministically, whether or
+    ## not bumphunter happens to be installed
     expect_warning(
         res <- suppressMessages(champ.process(
             runload = FALSE, runimpute = FALSE, runQC = FALSE, runnorm = FALSE,
             runSVD = FALSE, runCombat = FALSE, runDMP = FALSE, runDMR = TRUE,
+            DMRmethod = "NotAMethod",
             runBlock = FALSE, runGSEA = FALSE, runEpiMod = FALSE, runCNA = FALSE,
             runRefBase = FALSE, resultsDir = tempfile(), saveStepresults = FALSE,
             arraytype = "450K", verbose = FALSE)),

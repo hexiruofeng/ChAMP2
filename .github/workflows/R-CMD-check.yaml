@@ -8,7 +8,7 @@ on:
 
 jobs:
   R-CMD-check:
-    name: R ${{ matrix.r }} ( ${{ matrix.os }} )
+    name: R ${{ matrix.r }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -24,6 +24,12 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
       BIOCONDUCTOR_ONLINE: true
       R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+      # Suggests are installed below where they exist for the given R version;
+      # a missing optional package must not turn the check into an ERROR.
+      _R_CHECK_FORCE_SUGGESTS_: false
+      # Do not contact CRAN/Bioconductor mirrors from inside the check.
+      _R_CHECK_CRAN_INCOMING_: false
+      _R_CHECK_CRAN_INCOMING_REMOTE_: false
     steps:
       - uses: actions/checkout@v4
 
@@ -49,10 +55,16 @@ jobs:
             any::sva
             any::globaltest
             any::GenomicRanges
+            any::BiocGenerics
             any::quadprog
             any::testthat
             any::knitr
             any::rmarkdown
+            any::shiny
+            any::shinythemes
+            any::plotly
+            any::DT
+            any::dendextend
           needs: check
           dependencies: '"hard"'
 
@@ -64,8 +76,19 @@ jobs:
       - uses: r-lib/actions/check-r-package@v2
         with:
           args: 'c("--no-manual", "--as-cran")'
-          error-on: '"warning"'
+          error-on: '"error"'
           upload-snapshots: true
+
+      - name: Show check log on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "--- workspace ---"
+          ls -la
+          echo "--- 00check.log (tail) ---"
+          tail -n 120 ChAMP.Rcheck/00check.log 2>/dev/null || echo "no 00check.log"
+          echo "--- testthat output (tail) ---"
+          tail -n 80 ChAMP.Rcheck/tests/testthat.Rout* 2>/dev/null || echo "no testthat output"
 
       - name: Install optional packages (best effort)
         continue-on-error: true

@@ -3,10 +3,12 @@ title: "ChAMP2: Chip Analysis Methylation Pipeline"
 author: "Yuan Tian, Tiffany Morris, Lee Stirling, Andrew Feber, Andrew Teschendorff, Ankur Chakravarthy"
 date: "Package version 2.32.0"
 output:
-  prettydoc::html_pretty:
-    theme: cayman
-    highlight: github
+  rmarkdown::html_document:
     toc: true
+    toc_float: true
+    number_sections: false
+    highlight: tango
+    theme: cosmo
 vignette: >
   %\VignetteIndexEntry{ChAMP2: Chip Analysis Methylation Pipeline}
   %\VignetteEngine{knitr::rmarkdown}
@@ -238,7 +240,7 @@ a matrix.
 ```{r demo, eval=requireNamespace("ChAMPdata", quietly = TRUE)}
 library(ChAMP)
 pf <- ChAMP:::.champ_probe_features("450K")
-ids <- rownames(pf)[!is.na(pf$MAPINFO)][1:2000]
+ids <- rownames(pf)[!is.na(pf$MAPINFO)][1:1000]
 set.seed(1)
 beta <- matrix(rbeta(length(ids) * 10, 2, 5), nrow = length(ids),
                dimnames = list(ids, paste0("S", 1:10)))
